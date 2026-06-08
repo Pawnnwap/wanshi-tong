@@ -6,6 +6,15 @@ import time
 import concurrent.futures
 import threading
 
+import shutil
+
+opencode_bin = shutil.which("opencode")
+if opencode_bin:
+    opencode_bin_dir = os.path.dirname(opencode_bin)
+    os.environ.setdefault("PATH", f"{opencode_bin_dir}:" + os.environ.get("PATH", ""))
+else:
+    opencode_bin_dir = ""
+
 
 MODEL_FALLBACK = [
     "opencode/mimo-v2.5-free",
@@ -18,13 +27,16 @@ MODEL_FALLBACK = [
 def update_opencode():
     """Run opencode upgrade on startup."""
     try:
-        print("[upgrade] Running opencode upgrade...", flush=True)
-        opencode_bin = shutil.which("opencode") or "opencode"
+        print("[更新] 正在执行 opencode upgrade...")
+        env = os.environ.copy()
+        if opencode_bin_dir not in env.get("PATH", "").split(":"):
+            env["PATH"] = f"{opencode_bin_dir}:{env.get('PATH', '')}"
         result = subprocess.run(
             [opencode_bin, "upgrade"],
             capture_output=True,
             encoding="utf-8",
             timeout=60,
+            env=env,
         )
         if result.returncode == 0:
             print("[upgrade] opencode upgrade done")
@@ -45,18 +57,16 @@ def update_opencode():
     except subprocess.TimeoutExpired:
         print("[upgrade] WARNING: opencode upgrade timed out (60s), skipping")
     except Exception as e:
-        print(f"[upgrade] WARNING: opencode upgrade failed: {e}")
-
-
+        print(f"[更新] 警告: opencode upgrade 失败: {e}")
 def _run_single(prompt: str, model: str, timeout_s: int, label: str) -> tuple[str, bool]:
     """Run opencode with a single model. Returns (result_text, success)."""
     env = os.environ.copy()
     from core.config import load_config
     permissions = load_config().get("opencode", {}).get("permissions", {})
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permissions})
-    opencode_bin = shutil.which("opencode") or "opencode"
-    # Pass prompt via stdin to avoid Windows GBK command-line encoding issues
-    cmd = [opencode_bin, "run", "--format", "json", "-m", model]
+    if opencode_bin_dir not in env.get("PATH", "").split(":"):
+        env["PATH"] = f"{opencode_bin_dir}:{env.get('PATH', '')}"
+    cmd = ["opencode", "run", prompt, "--format", "json", "-m", model]
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
