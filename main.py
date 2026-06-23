@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Wanshi Tong -- Auto-discovering modular scheduler (bilingual search)"""
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from core.registry import discover_modules, discover_analyzers, discover_reporters, discover_filters
 from core.opencode_client import run_parallel, update_opencode
@@ -31,13 +31,28 @@ def main():
     log(f"  modules: {len(modules)} | analyzers: {len(analyzers)} | reporters: {len(reporters)}")
 
     date_str = datetime.now().strftime('%Y-%m-%d')
+
+    yesterday = datetime.now() - timedelta(days=1)
+    today = datetime.now()
+    date_templates = {
+        "yesterday_cn": f"{yesterday.year}年{yesterday.month}月{yesterday.day}日",
+        "today_cn": f"{today.year}年{today.month}月{today.day}日",
+        "yesterday_en": f"{yesterday.strftime('%B')} {yesterday.day}, {yesterday.year}",
+        "today_en": f"{today.strftime('%B')} {today.day}, {today.year}",
+        "yesterday_short_cn": f"{yesterday.month}月{yesterday.day}日",
+        "today_short_cn": f"{today.month}月{today.day}日",
+        "yesterday_day": str(yesterday.day),
+        "today_day": str(today.day),
+        "month_en": today.strftime('%B'),
+        "year": str(today.year),
+    }
     time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     # ---- Collection (bilingual search per module) ----
     log("[step 3/7] Bilingual search collection...")
     all_tasks = []
     for m in modules:
-        tasks = m.get_tasks()
+        tasks = m.get_tasks(date_templates)
         all_tasks.extend(tasks)
 
     log(f"  {len(all_tasks)} tasks ({len(modules)} modules x 2 languages), running in parallel...")
@@ -50,7 +65,7 @@ def main():
     log("[step 4/7] Merging Chinese/English results...")
     module_results = []
     for module in modules:
-        tasks = module.get_tasks()
+        tasks = module.get_tasks(date_templates)
         zh_name = f"{module.name}_zh"
         en_name = f"{module.name}_en"
         zh_raw = ""

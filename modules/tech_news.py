@@ -1,13 +1,11 @@
-from core.base import Module, _DATE_RULES_ZH, _DATE_RULES_EN, _FORMAT_ZH, _FORMAT_EN
+from core.base import Module
 
 
 class TechNewsModule(Module):
     name = "tech_news"
     title = "【科技新闻】"
     model = ""
-
-    prompt_zh = f"""
-你是一位科技新闻记者。请搜索2026年6月5日或6月6日发布的全球科技新闻。
+    prompt_zh = """你是一位科技新闻记者。请搜索{yesterday_cn}或{today_cn}发布的全球科技新闻。
 
 ## 可用工具（优先级从高到低）
 1. **newsmcp get_news**（首选）: 直接获取实时结构化新闻
@@ -16,15 +14,17 @@ class TechNewsModule(Module):
 3. **rss-news fetch_news**: 从RSS订阅源获取新闻
 
 ## 日期红线（必须遵守）
-{_DATE_RULES_ZH}
-- 如果找不到符合条件的新闻，请注明"未找到6月5日-6月6日的科技新闻"
+- 禁止包含任何发布日期早于{yesterday_cn}的新闻
+- 禁止包含任何发布日晚于{today_cn}的新闻（未来日期）
+- 只允许 {yesterday_cn}（昨天）或 {today_cn}（今天）的新闻
+- 搜到不符合日期条件的内容 → 直接丢弃
+- 如果找不到符合条件的新闻，请注明"未找到{yesterday_short_cn}-{today_short_cn}的科技新闻"
 
 覆盖：AI大模型、半导体芯片、新能源电动车、航天科技、科技巨头动态
 
-{_FORMAT_ZH}"""
-
-    prompt_en = f"""
-You are a technology news journalist. Search for global technology news published on June 5 or June 6, 2026.
+每条输出格式：**[标题]** | 摘要 | 来源 | **2026年X月X日**
+当前日期：{today_cn}"""
+    prompt_en = """You are a technology news journalist. Search for global technology news published on {yesterday_en} or {today_en}.
 
 ## Available Tools (priority order)
 1. **newsmcp get_news** (preferred): Get real-time structured news directly
@@ -33,9 +33,13 @@ You are a technology news journalist. Search for global technology news publishe
 3. **rss-news fetch_news**: Get news from RSS feed subscriptions
 
 ## Date Red Lines (MUST follow)
-{_DATE_RULES_EN}
-- If no qualifying news found, state: "No tech news found for June 5-6, 2026"
+- DO NOT include any news published before {yesterday_en}
+- DO NOT include any news published after {today_en} (future dates)
+- ONLY include news from {yesterday_en} (yesterday) or {today_en} (today)
+- Discard any content that doesn't meet the date requirement
+- If no qualifying news found, state: "No tech news found for {month_en} {yesterday_day}-{today_day}, {year}"
 
 Coverage: AI/LLM, semiconductors, EVs/new energy, space tech, big tech company moves
 
-{_FORMAT_EN}"""
+Output format per item: **[Title]** | Summary | Source | **Month X, Year**
+Current date: {today_en}"""
