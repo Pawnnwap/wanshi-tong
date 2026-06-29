@@ -4,9 +4,7 @@ import os
 import shutil
 import time
 import concurrent.futures
-import threading
 
-import shutil
 
 opencode_bin = shutil.which("opencode")
 if opencode_bin:
@@ -17,8 +15,8 @@ else:
 
 
 MODEL_FALLBACK = [
-    "opencode/mimo-v2.5-free",
     "opencode/deepseek-v4-flash-free",
+    "opencode/mimo-v2.5-free",
     "opencode/nemotron-3-ultra-free",
     "opencode/big-pickle",
 ]
@@ -75,28 +73,11 @@ def _run_single(prompt: str, model: str, timeout_s: int, label: str) -> tuple[st
         env=env,
         encoding="utf-8",
     )
-
-    timed_out = threading.Event()
-    def _kill_on_timeout():
-        timed_out.set()
-        print(f"  [timeout] {label} ({model}) exceeded {timeout_s}s, killing...", flush=True)
-        try:
-            proc.kill()
-        except OSError:
-            pass
-    timer = threading.Timer(timeout_s, _kill_on_timeout)
-    timer.start()
     try:
-        proc.stdin.write(prompt)
-        proc.stdin.close()
-    except OSError:
-        pass
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_s + 5)
+        stdout, stderr = proc.communicate(input=prompt, timeout=timeout_s + 5)
     except subprocess.TimeoutExpired:
         proc.kill()
         stdout, stderr = proc.communicate()
-    timer.cancel()
 
     text_parts = []
     for line in (stdout or "").splitlines():
@@ -113,7 +94,7 @@ def _run_single(prompt: str, model: str, timeout_s: int, label: str) -> tuple[st
                 text_parts.append(t)
 
     result = "".join(text_parts)
-    was_killed = timed_out.is_set() or proc.returncode == -9
+    was_killed = proc.returncode == -9
     success = bool(result.strip()) and not was_killed
     return result, success
 
@@ -121,7 +102,7 @@ def _run_single(prompt: str, model: str, timeout_s: int, label: str) -> tuple[st
 def run_opencode(prompt: str, model: str = "", timeout_s: int = 0, task_name: str = "") -> str:
     from core.config import load_config
     cfg = load_config().get("opencode", {})
-    timeout_s = timeout_s or cfg.get("timeout_s", 300)
+    timeout_s = timeout_s or cfg.get("timeout_s", 600)
     label = task_name or "task"
 
     if model:
@@ -143,8 +124,7 @@ def run_opencode(prompt: str, model: str = "", timeout_s: int = 0, task_name: st
 
         print(f"  [fail] {label} ({m}) ({elapsed:.1f}s, {result_len}c) -> trying next model", flush=True)
 
-    print(f"  [all failed] {label} all models failed, returning last result", flush=True)
-    return result
+    raise RuntimeError(f"{label}: all configured models failed")
 
 
 def run_parallel(tasks: list[dict]) -> list[str]:
@@ -163,13 +143,16 @@ def run_parallel(tasks: list[dict]) -> list[str]:
             )
             future_map[f] = task.get("name", "")
         results = []
+        errors = []
         for f in concurrent.futures.as_completed(future_map):
             name = future_map[f]
             try:
                 result = f.result()
                 results.append((name, result))
             except Exception as e:
-                results.append((name, f"[{name}] Error: {e}"))
+                errors.append(f"{name}: {e}")
+    if errors:
+        raise RuntimeError("parallel collection failed: " + "; ".join(errors))
     task_names = [t["name"] for t in tasks]
     results.sort(key=lambda x: task_names.index(x[0]))
     return [r[1] for r in results]

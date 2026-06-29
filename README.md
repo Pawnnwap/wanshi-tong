@@ -58,13 +58,15 @@ Create config.json in the project root:
 {
   "opencode": {
     "permissions": {},
-    "timeout_s": 300
+    "timeout_s": 600
   },
   "parallel": {
     "max_workers": 5
   },
   "feishu": {
-    "max_chars_per_msg": 1200
+    "max_chars_per_msg": 1200,
+    "max_attempts": 3,
+    "retry_delay_s": 2
   }
 }
 ```

@@ -130,7 +130,7 @@ def main():
     report_text = "\n".join(lines)
 
     # ---- Date cleanup ----
-    report_text = cleanup_dates(report_text)
+    report_text = cleanup_dates(report_text, allowed_dates=(yesterday, today))
     log(f"  report length: {len(report_text)}c")
 
     # ---- Save ----
@@ -140,6 +140,7 @@ def main():
     log(f"  saved: {report_file}")
 
     # ---- Send ----
+    reporter_errors = []
     for reporter in reporters:
         log(f"  {reporter.name} sending...")
         try:
@@ -147,6 +148,10 @@ def main():
             log(f"  {reporter.name} sent")
         except Exception as e:
             log(f"  {reporter.name} failed: {e}")
+            reporter_errors.append(f"{reporter.name}: {e}")
+
+    if reporter_errors:
+        raise RuntimeError("report delivery failed: " + "; ".join(reporter_errors))
 
     log("=" * 60)
     log("Wanshi Tong Daily Briefing -- done")
