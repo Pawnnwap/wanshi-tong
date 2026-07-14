@@ -9,7 +9,7 @@ Collects news across 5 domains in **Chinese + English**, filters by importance, 
 ## Architecture
 
 ```
-Modules (5)        -->  Bilingual AI Search (zh + en per module)
+Modules (6+)       -->  Bilingual AI Search (zh + en per module)
     |
 Merge              -->  Combine Chinese + English results
     |
@@ -20,9 +20,11 @@ Analyzer (1)       -->  Deep cross-domain strategic analysis
 Reporter (1)       -->  Feishu webhook delivery
 ```
 
-All components are auto-discovered via pkgutil -- drop a new .py file in modules/ and it just works.
+Discovery: `core/registry.py` auto-discovers modules, filters, analyzers, and reporters via `pkgutil`. Shared catalog constants (asset lists, macro indicators) are in `modules/catalog.py`.
 
-Runtime responsibilities are split across focused modules: `core/context.py` owns the run timestamp and date templates, `core/pipeline.py` coordinates components, `core/process.py` runs idle-aware subprocesses, and `core/report.py` renders and cleans reports. News and structured-data collectors inherit shared prompt policies from `modules/news.py` and `modules/structured_data.py`.
+All components are auto-discovered via pkgutil -- drop a new .py file in modules/ and it just works. Shared constants for asset lists and macro indicators live in `modules/catalog.py`. Date-sensitive news collectors inherit `NewsModule` from `modules/news.py`, and tabular/structured collectors inherit `StructuredDataModule` from `modules/structured_data.py`.
+
+Runtime responsibilities are split across focused modules: `core/context.py` owns the run timestamp and date templates, `core/pipeline.py` coordinates components, `core/process.py` runs idle-aware subprocesses, `core/report.py` renders and cleans reports, and `core/registry.py` handles auto-discovery of all component types. News and structured-data collectors inherit shared prompt policies from `modules/news.py` and `modules/structured_data.py`.
 
 ## Prerequisites
 
@@ -117,6 +119,8 @@ Make sure these MCP servers are configured and running in your opencode environm
 
 ## Adding a Module
 
+### Basic module
+
 Create a new file in `modules/`:
 
 ```python
@@ -131,7 +135,47 @@ class MyModule(Module):
     prompt_en = "Find example data published on {today_en}. Include source and date."
 ```
 
-For date-sensitive news or tabular datasets, inherit `NewsModule` or `StructuredDataModule` to reuse the shared prompt policy. No registration is needed.
+### Date-sensitive news module
+
+Inherit `NewsModule` from `modules/news.py` and set class attributes:
+
+```python
+from modules.news import NewsModule
+
+
+class MyNewsModule(NewsModule):
+    name = "my_news"
+    title = "My News"
+    search_scope_zh = "示例新闻"
+    search_scope_en = "example news"
+    coverage_zh = "领域覆盖说明"
+    coverage_en = "coverage description"
+    sources_zh = "来源1, 来源2"
+    sources_en = "Source 1, Source 2"
+    empty_label_zh = "示例"
+    empty_label_en = "example"
+```
+
+### Structured/tabular data module
+
+Inherit `StructuredDataModule` from `modules/structured_data.py`:
+
+```python
+from modules.structured_data import StructuredDataModule
+
+
+class MyDataModule(StructuredDataModule):
+    name = "my_data"
+    title = "My Data"
+    request_zh = "获取示例数据"
+    request_en = "Get example data"
+    rules_zh = ("规则1", "规则2")
+    rules_en = ("Rule 1", "Rule 2")
+    output_zh = "输出格式说明"
+    output_en = "output format"
+```
+
+For catalog constants (asset lists, macro indicators), import from `modules.catalog`. No registration is needed for any module type.
 
 ## Acknowledgements
 

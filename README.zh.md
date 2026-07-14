@@ -9,7 +9,7 @@
 ## 架构
 
 ```
-模块 (5 个）     -->  双语 AI 搜索（每个模块中 + 英）
+模块 (6+)        -->  双语 AI 搜索（每个模块中 + 英）
     |
 合并              -->  合并中英文结果
     |
@@ -20,9 +20,11 @@
 报告器 (1 个）    -->  飞书 Webhook 推送
 ```
 
-所有组件通过 `pkgutil` 自动发现 —— 在 `modules/` 下新建 `.py` 文件即可，无需注册。
+自动发现：`core/registry.py` 通过 `pkgutil` 自动发现模块、过滤器、分析器和报告器。`modules/catalog.py` 包含共享的资产和宏观指标目录常量。
 
-运行职责按模块拆分：`core/context.py` 统一管理运行时间和日期模板，`core/pipeline.py` 编排组件，`core/process.py` 执行带空闲进度监控的子进程，`core/report.py` 负责报告渲染和日期清理。新闻和结构化数据采集器分别继承 `modules/news.py` 与 `modules/structured_data.py` 的共享提示词策略。
+所有组件通过 `pkgutil` 自动发现 —— 在 `modules/` 下新建 `.py` 文件即可，无需注册。`modules/catalog.py` 提供资产列表和宏观指标的共享常量。日期敏感型新闻采集器继承 `modules/news.py` 中的 `NewsModule`，表格/结构化数据采集器继承 `modules/structured_data.py` 中的 `StructuredDataModule`。
+
+运行职责按模块拆分：`core/context.py` 统一管理运行时间和日期模板，`core/pipeline.py` 编排组件，`core/process.py` 执行带空闲进度监控的子进程，`core/report.py` 负责报告渲染和日期清理，`core/registry.py` 处理所有组件类型的自动发现。新闻和结构化数据采集器分别继承 `modules/news.py` 与 `modules/structured_data.py` 的共享提示词策略。
 
 ## 前置条件
 
@@ -117,6 +119,8 @@ python main.py
 
 ## 添加模块
 
+### 基础模块
+
 在 `modules/` 下新建文件：
 
 ```python
@@ -125,13 +129,53 @@ from core.base import Module
 
 class MyModule(Module):
     name = "my_module"
-    title = "My Title"
+    title = "我的模块"
     model = ""  # 空 = 使用配置中的默认模型
     prompt_zh = "搜索{today_cn}发布的示例数据。输出中文并标注来源和日期。"
     prompt_en = "Find example data published on {today_en}. Include source and date."
 ```
 
-日期敏感新闻或表格数据可分别继承 `NewsModule` 或 `StructuredDataModule`，复用统一提示词策略。无需注册。
+### 日期敏感型新闻模块
+
+继承 `modules/news.py` 中的 `NewsModule` 并设置类属性：
+
+```python
+from modules.news import NewsModule
+
+
+class MyNewsModule(NewsModule):
+    name = "my_news"
+    title = "我的新闻"
+    search_scope_zh = "示例新闻"
+    search_scope_en = "example news"
+    coverage_zh = "领域覆盖说明"
+    coverage_en = "coverage description"
+    sources_zh = "来源1, 来源2"
+    sources_en = "Source 1, Source 2"
+    empty_label_zh = "示例"
+    empty_label_en = "example"
+```
+
+### 结构化/表格数据模块
+
+继承 `modules/structured_data.py` 中的 `StructuredDataModule`：
+
+```python
+from modules.structured_data import StructuredDataModule
+
+
+class MyDataModule(StructuredDataModule):
+    name = "my_data"
+    title = "我的数据"
+    request_zh = "获取示例数据"
+    request_en = "Get example data"
+    rules_zh = ("规则1", "规则2")
+    rules_en = ("Rule 1", "Rule 2")
+    output_zh = "输出格式说明"
+    output_en = "output format"
+```
+
+对于资产列表和宏观指标常量，可从 `modules.catalog` 导入。任何模块类型都无需注册。
 
 ## 致谢
 
