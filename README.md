@@ -22,6 +22,8 @@ Reporter (1)       -->  Feishu webhook delivery
 
 All components are auto-discovered via pkgutil -- drop a new .py file in modules/ and it just works.
 
+Runtime responsibilities are split across focused modules: `core/context.py` owns the run timestamp and date templates, `core/pipeline.py` coordinates components, `core/process.py` runs idle-aware subprocesses, and `core/report.py` renders and cleans reports. News and structured-data collectors inherit shared prompt policies from `modules/news.py` and `modules/structured_data.py`.
+
 ## Prerequisites
 
 - **Python 3.10+**
@@ -58,7 +60,7 @@ Create config.json in the project root:
 {
   "opencode": {
     "permissions": {},
-    "timeout_s": 600
+    "idle_timeout_s": 600
   },
   "parallel": {
     "max_workers": 5
@@ -71,9 +73,9 @@ Create config.json in the project root:
 }
 ```
 
-For Feishu delivery, create credentials.json:
+`opencode.idle_timeout_s` resets whenever the subprocess emits output; there is no total runtime limit. The legacy `timeout_s` key remains supported as an alias.
 
-`opencode.timeout_s` is an idle timeout: it resets whenever the subprocess emits output. It is not a total runtime limit.
+For Feishu delivery, create credentials.json:
 
 ```json
 {
@@ -115,31 +117,21 @@ Make sure these MCP servers are configured and running in your opencode environm
 
 ## Adding a Module
 
-Create a new file in modules/:
+Create a new file in `modules/`:
 
 ```python
-from core.base import Module, _DATE_RULES_ZH, _DATE_RULES_EN, _FORMAT_ZH, _FORMAT_EN
+from core.base import Module
 
 
 class MyModule(Module):
     name = "my_module"
     title = "My Title"
-    model = ""  # empty = try all fallback models
-
-    prompt_zh = f"""
-你是...请搜索...的新闻。
-## 日期红线（必须遵守）
-{_DATE_RULES_ZH}
-{_FORMAT_ZH}"""
-
-    prompt_en = f"""
-You are... Search for... news.
-## Date Red Lines (MUST follow)
-{_DATE_RULES_EN}
-{_FORMAT_EN}"""
+    model = ""  # empty = use the configured default model
+    prompt_zh = "搜索{today_cn}发布的示例数据。输出中文并标注来源和日期。"
+    prompt_en = "Find example data published on {today_en}. Include source and date."
 ```
 
-No registration needed -- it's auto-discovered on next run.
+For date-sensitive news or tabular datasets, inherit `NewsModule` or `StructuredDataModule` to reuse the shared prompt policy. No registration is needed.
 
 ## Acknowledgements
 

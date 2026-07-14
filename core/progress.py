@@ -1,11 +1,12 @@
 import sys
+import threading
 import time
 
 
 class ProgressBar:
-    def __init__(self, label: str, timeout_s: float, width: int = 24, stream=None):
+    def __init__(self, label: str, idle_timeout_s: float, width: int = 24, stream=None):
         self.label = label
-        self.timeout_s = max(float(timeout_s), 0.1)
+        self.idle_timeout_s = max(float(idle_timeout_s), 0.1)
         self.width = width
         self.stream = stream or sys.stderr
         self.started_at = time.monotonic()
@@ -21,23 +22,23 @@ class ProgressBar:
         return time.monotonic() - self.last_progress_at
 
     def remaining_s(self) -> float:
-        return max(0.0, self.timeout_s - self.idle_s())
+        return max(0.0, self.idle_timeout_s - self.idle_s())
 
     def timed_out(self) -> bool:
-        return self.idle_s() >= self.timeout_s
+        return self.idle_s() >= self.idle_timeout_s
 
     def render(self, force: bool = False) -> None:
         now = time.monotonic()
         if not force and now - self.last_render_at < 1:
             return
         self.last_render_at = now
-        used = min(self.idle_s() / self.timeout_s, 1.0)
+        used = min(self.idle_s() / self.idle_timeout_s, 1.0)
         filled = int(round(self.width * used))
         bar = "#" * filled + "-" * (self.width - filled)
         elapsed = now - self.started_at
         message = (
             f"\r[{bar}] {self.label} "
-            f"idle={self.idle_s():.0f}s/{self.timeout_s:.0f}s "
+            f"idle={self.idle_s():.0f}s/{self.idle_timeout_s:.0f}s "
             f"elapsed={elapsed:.0f}s"
         )
         print(message, end="", file=self.stream, flush=True)
@@ -50,18 +51,24 @@ class ProgressBar:
         print(f"\r[{status}] {self.label} elapsed={elapsed:.1f}s", file=self.stream, flush=True)
 
 
-def sleep_with_progress(seconds: float, label: str) -> None:
+def sleep_with_progress(
+    seconds: float,
+    label: str,
+    cancel_event: threading.Event | None = None,
+) -> bool:
     progress = ProgressBar(label, seconds)
     deadline = time.monotonic() + seconds
     try:
         while True:
+            if cancel_event and cancel_event.is_set():
+                progress.close("cancelled")
+                return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 progress.close("done")
-                return
+                return True
             progress.render()
             time.sleep(min(1.0, remaining))
     except BaseException:
         progress.close("stopped")
         raise
-

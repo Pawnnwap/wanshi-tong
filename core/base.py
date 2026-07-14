@@ -1,6 +1,27 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Mapping, Optional
+
+
+@dataclass(frozen=True)
+class Task:
+    name: str
+    prompt: str
+    model: str = ""
+    idle_timeout_s: float = 0
+    max_attempts: int = 0
+
+    @classmethod
+    def from_value(cls, value: "Task | Mapping") -> "Task":
+        if isinstance(value, cls):
+            return value
+        return cls(
+            name=value.get("name", ""),
+            prompt=value["prompt"],
+            model=value.get("model", ""),
+            idle_timeout_s=value.get("idle_timeout_s", value.get("timeout_s", 0)),
+            max_attempts=value.get("max_attempts", 0),
+        )
 
 
 @dataclass
@@ -19,17 +40,29 @@ class Module(ABC):
     model: str = ""
     prompt_zh: str = ""
     prompt_en: str = ""
+    task_idle_timeout_s: float = 0
+    task_max_attempts: int = 0
 
-    def get_tasks(self, date_templates: dict | None = None) -> list[dict]:
+    def get_prompt_templates(self) -> Mapping[str, str]:
+        return {"zh": self.prompt_zh, "en": self.prompt_en}
+
+    def get_tasks(self, date_templates: Mapping[str, str] | None = None) -> list[Task]:
         """返回中英双语两个任务，支持日期模板注入。"""
-        prompt_zh = self.prompt_zh
-        prompt_en = self.prompt_en
+        prompts = self.get_prompt_templates()
         if date_templates:
-            prompt_zh = prompt_zh.format(**date_templates)
-            prompt_en = prompt_en.format(**date_templates)
+            prompts = {
+                language: prompt.format(**date_templates)
+                for language, prompt in prompts.items()
+            }
         return [
-            {"name": f"{self.name}_zh", "prompt": prompt_zh, "model": self.model},
-            {"name": f"{self.name}_en", "prompt": prompt_en, "model": self.model},
+            Task(
+                name=f"{self.name}_{language}",
+                prompt=prompt,
+                model=self.model,
+                idle_timeout_s=self.task_idle_timeout_s,
+                max_attempts=self.task_max_attempts,
+            )
+            for language, prompt in prompts.items()
         ]
 
     def combine_results(self, zh_result: str, en_result: str) -> str:

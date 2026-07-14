@@ -1,270 +1,241 @@
-import subprocess
+import concurrent.futures
 import json
 import os
-import queue
 import shutil
+import subprocess
 import threading
 import time
-import concurrent.futures
+from collections.abc import Mapping, Sequence
 
-from core.progress import ProgressBar, sleep_with_progress
-
-
-opencode_bin = shutil.which("opencode")
-if opencode_bin:
-    opencode_bin_dir = os.path.dirname(opencode_bin)
-    os.environ.setdefault("PATH", f"{opencode_bin_dir}:" + os.environ.get("PATH", ""))
-else:
-    opencode_bin_dir = ""
+from core.base import Task
+from core.config import load_config
+from core.process import ProcessCancelled
+from core.process import run_process_with_idle_progress as _run_process_with_idle_progress
+from core.progress import sleep_with_progress
 
 
-MODEL_FALLBACK = [
+OPENCODE_BIN = shutil.which("opencode")
+MODEL_FALLBACK = (
     "agnes/agnes-2.0-flash",
     "opencode/deepseek-v4-flash-free",
     "opencode/mimo-v2.5-free",
     "opencode/nemotron-3-ultra-free",
     "opencode/big-pickle",
-]
+)
 
 
-def _reader_thread(pipe, stream_name: str, output: queue.Queue) -> None:
+def _opencode_env(include_permissions: bool = False) -> dict[str, str]:
+    env = os.environ.copy()
+    if OPENCODE_BIN:
+        binary_dir = os.path.dirname(OPENCODE_BIN)
+        path_parts = env.get("PATH", "").split(os.pathsep)
+        if binary_dir not in path_parts:
+            env["PATH"] = os.pathsep.join([binary_dir, *path_parts])
+    if include_permissions:
+        permissions = load_config().get("opencode", {}).get("permissions", {})
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permissions})
+    return env
+
+
+def _executable() -> str:
+    if not OPENCODE_BIN:
+        raise FileNotFoundError("opencode command not found")
+    return OPENCODE_BIN
+
+
+def update_opencode() -> None:
+    """Upgrade OpenCode without making startup depend on upgrade availability."""
     try:
-        for line in iter(pipe.readline, ""):
-            output.put((stream_name, line))
-    finally:
-        pipe.close()
-
-
-def _run_process_with_idle_progress(
-    cmd: list[str],
-    input_text: str,
-    idle_timeout_s: int,
-    label: str,
-    env: dict,
-) -> tuple[list[str], list[str], int]:
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-        encoding="utf-8",
-    )
-    if proc.stdin:
-        proc.stdin.write(input_text)
-        proc.stdin.close()
-
-    output = queue.Queue()
-    threads = [
-        threading.Thread(target=_reader_thread, args=(proc.stdout, "stdout", output), daemon=True),
-        threading.Thread(target=_reader_thread, args=(proc.stderr, "stderr", output), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
-
-    stdout_lines = []
-    stderr_lines = []
-    progress = ProgressBar(label, idle_timeout_s)
-    try:
-        while True:
-            try:
-                stream_name, line = output.get(timeout=0.25)
-            except queue.Empty:
-                progress.render()
-                if proc.poll() is not None:
-                    break
-                if progress.timed_out():
-                    proc.kill()
-                    proc.wait()
-                    progress.close("timeout")
-                    raise subprocess.TimeoutExpired(cmd, idle_timeout_s)
-                continue
-
-            progress.mark_progress()
-            if stream_name == "stdout":
-                stdout_lines.append(line)
-            else:
-                stderr_lines.append(line)
-
-            if proc.poll() is not None and output.empty():
-                break
-    finally:
-        for thread in threads:
-            thread.join(timeout=1)
-        while True:
-            try:
-                stream_name, line = output.get_nowait()
-            except queue.Empty:
-                break
-            if stream_name == "stdout":
-                stdout_lines.append(line)
-            else:
-                stderr_lines.append(line)
-
-    returncode = proc.wait()
-    progress.close("done" if returncode == 0 else f"exit {returncode}")
-    return stdout_lines, stderr_lines, returncode
-
-
-def update_opencode():
-    """Run opencode upgrade on startup."""
-    try:
-        print("[更新] 正在执行 opencode upgrade...")
-        env = os.environ.copy()
-        if opencode_bin_dir not in env.get("PATH", "").split(":"):
-            env["PATH"] = f"{opencode_bin_dir}:{env.get('PATH', '')}"
-        stdout_lines, stderr_lines, returncode = _run_process_with_idle_progress(
-            [opencode_bin, "upgrade"],
+        print("[update] running opencode upgrade...")
+        stdout, stderr, returncode = _run_process_with_idle_progress(
+            [_executable(), "upgrade"],
             "",
             60,
             "opencode upgrade",
-            env,
+            _opencode_env(),
         )
         if returncode == 0:
             print("[upgrade] opencode upgrade done")
-            try:
-                stdout = "".join(stdout_lines).strip()
-                if stdout:
-                    print(stdout)
-            except UnicodeEncodeError:
-                pass
+            if output := "".join(stdout).strip():
+                print(output)
         else:
             print(f"[upgrade] opencode upgrade exited with code {returncode}")
-            try:
-                stderr = "".join(stderr_lines).strip()
-                if stderr:
-                    print(f"[upgrade] stderr: {stderr}")
-            except UnicodeEncodeError:
-                pass
+            if output := "".join(stderr).strip():
+                print(f"[upgrade] stderr: {output}")
     except FileNotFoundError:
         print("[upgrade] WARNING: opencode command not found, skipping upgrade")
     except subprocess.TimeoutExpired:
         print("[upgrade] WARNING: opencode upgrade had no output for 60s, skipping")
-    except Exception as e:
-        print(f"[更新] 警告: opencode upgrade 失败: {e}")
-def _run_single(prompt: str, model: str, timeout_s: int, label: str, max_attempts: int = 0) -> tuple[str, bool]:
-    """Run opencode with a single model. Returns (result_text, success)."""
-    env = os.environ.copy()
-    from core.config import load_config
-    permissions = load_config().get("opencode", {}).get("permissions", {})
-    env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permissions})
-    if opencode_bin_dir not in env.get("PATH", "").split(":"):
-        env["PATH"] = f"{opencode_bin_dir}:{env.get('PATH', '')}"
-    cmd = ["opencode", "run", prompt, "--format", "json", "-m", model]
-    max_attempts = max_attempts or (3 if model.startswith("agnes/") else 1)
-    stdout_lines = []
-    stderr_lines = []
+    except Exception as exc:
+        print(f"[upgrade] WARNING: opencode upgrade failed: {exc}")
+
+
+def _run_single(
+    prompt: str,
+    model: str,
+    idle_timeout_s: float,
+    label: str,
+    max_attempts: int = 0,
+    cancel_event: threading.Event | None = None,
+) -> tuple[str, bool]:
+    """Run one model, retrying provider failures while output remains idle-aware."""
+    attempts = max_attempts or (3 if model.startswith("agnes/") else 1)
+    command = [_executable(), "run", prompt, "--format", "json", "-m", model]
+    stdout: list[str] = []
+    stderr: list[str] = []
     returncode = -9
 
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, attempts + 1):
+        if cancel_event and cancel_event.is_set():
+            raise ProcessCancelled(f"{label} cancelled")
         try:
-            stdout_lines, stderr_lines, returncode = _run_process_with_idle_progress(
-                cmd,
+            stdout, stderr, returncode = _run_process_with_idle_progress(
+                command,
                 prompt,
-                timeout_s,
-                f"{label} ({model}) attempt {attempt}/{max_attempts}",
-                env,
+                idle_timeout_s,
+                f"{label} ({model}) attempt {attempt}/{attempts}",
+                _opencode_env(include_permissions=True),
+                cancel_event,
             )
         except subprocess.TimeoutExpired:
-            stdout_lines = []
-            stderr_lines = []
-            returncode = -9
+            stdout, stderr, returncode = [], [], -9
 
         if returncode == 0:
             break
+        if error_output := "".join(stderr).strip():
+            print(f"  [stderr] {label} ({model}): {error_output[:1000]}", flush=True)
+        if attempt < attempts:
+            if not sleep_with_progress(
+                10 * attempt,
+                f"retry {label} ({model})",
+                cancel_event,
+            ):
+                raise ProcessCancelled(f"{label} cancelled")
 
-        stderr = "".join(stderr_lines).strip()
-        if stderr:
-            print(f"  [stderr] {label} ({model}): {stderr[:1000]}", flush=True)
-        if attempt < max_attempts:
-            sleep_with_progress(10 * attempt, f"retry {label} ({model})")
+    result = _parse_text_events(stdout)
+    return result, returncode == 0 and bool(result.strip())
 
+
+def _parse_text_events(lines: Sequence[str]) -> str:
     text_parts = []
-    for line in stdout_lines:
-        line = line.strip()
-        if not line:
-            continue
+    for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") == "text":
-            t = event.get("part", {}).get("text", "")
-            if t:
-                text_parts.append(t)
-
-    result = "".join(text_parts)
-    was_killed = returncode == -9
-    success = returncode == 0 and bool(result.strip()) and not was_killed
-    return result, success
+        if event.get("type") == "text" and (text := event.get("part", {}).get("text", "")):
+            text_parts.append(text)
+    return "".join(text_parts)
 
 
 def run_opencode(
     prompt: str,
     model: str = "",
-    timeout_s: int = 0,
+    idle_timeout_s: float = 0,
     task_name: str = "",
     max_attempts: int = 0,
+    cancel_event: threading.Event | None = None,
+    **legacy_options,
 ) -> str:
-    from core.config import load_config
-    cfg = load_config().get("opencode", {})
-    timeout_s = timeout_s or cfg.get("timeout_s", 600)
+    if "timeout_s" in legacy_options:
+        idle_timeout_s = idle_timeout_s or legacy_options.pop("timeout_s")
+    if legacy_options:
+        names = ", ".join(sorted(legacy_options))
+        raise TypeError(f"unexpected options: {names}")
+
+    config = load_config().get("opencode", {})
+    idle_timeout_s = idle_timeout_s or config.get("idle_timeout_s", config.get("timeout_s", 600))
     label = task_name or "task"
 
-    if model:
-        models_to_try = [model]
-    else:
-        configured_model = cfg.get("model", "")
-        models_to_try = []
-        if configured_model:
-            models_to_try.append(configured_model)
-        if not configured_model.startswith("agnes/"):
-            models_to_try.extend(m for m in MODEL_FALLBACK if m not in models_to_try)
-
-    result = ""
-    for m in models_to_try:
-        print(f"  [start] {label} ({m})", flush=True)
-        t_start = time.time()
-        result, success = _run_single(prompt, m, timeout_s, label, max_attempts=max_attempts)
-        elapsed = time.time() - t_start
-        result_len = len(result)
-
+    for candidate in _models_to_try(model, config.get("model", "")):
+        print(f"  [start] {label} ({candidate})", flush=True)
+        started_at = time.monotonic()
+        result, success = _run_single(
+            prompt,
+            candidate,
+            idle_timeout_s,
+            label,
+            max_attempts=max_attempts,
+            cancel_event=cancel_event,
+        )
+        elapsed = time.monotonic() - started_at
         if success:
-            print(f"  [done] {label} ({m}) ({elapsed:.1f}s, {result_len} chars)", flush=True)
+            print(f"  [done] {label} ({candidate}) ({elapsed:.1f}s, {len(result)} chars)", flush=True)
             return result
-
-        print(f"  [fail] {label} ({m}) ({elapsed:.1f}s, {result_len}c) -> trying next model", flush=True)
-
+        print(
+            f"  [fail] {label} ({candidate}) ({elapsed:.1f}s, {len(result)}c) -> trying next model",
+            flush=True,
+        )
     raise RuntimeError(f"{label}: all configured models failed")
 
 
-def run_parallel(tasks: list[dict]) -> list[str]:
-    from core.config import load_config
-    cfg = load_config().get("parallel", {})
-    max_workers = cfg.get("max_workers", 5)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map = {}
-        for task in tasks:
-            f = pool.submit(
-                run_opencode,
-                task["prompt"],
-                task.get("model", ""),
-                task.get("timeout_s", 0),
-                task.get("name", ""),
-                task.get("max_attempts", 0),
-            )
-            future_map[f] = task.get("name", "")
-        results = []
-        errors = []
-        for f in concurrent.futures.as_completed(future_map):
-            name = future_map[f]
+def _models_to_try(requested: str, configured: str) -> list[str]:
+    if requested:
+        return [requested]
+    models = [configured] if configured else []
+    if not configured.startswith("agnes/"):
+        models.extend(model for model in MODEL_FALLBACK if model not in models)
+    return models
+
+
+def run_parallel(tasks: Sequence[Task | Mapping]) -> list[str]:
+    normalized = [Task.from_value(task) for task in tasks]
+    max_workers = load_config().get("parallel", {}).get("max_workers", 5)
+    results = [""] * len(normalized)
+    errors = []
+    cancel_event = threading.Event()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    future_map = {}
+    task_iterator = iter(enumerate(normalized))
+
+    def submit_next() -> bool:
+        try:
+            index, task = next(task_iterator)
+        except StopIteration:
+            return False
+        future = pool.submit(
+            run_opencode,
+            task.prompt,
+            task.model,
+            task.idle_timeout_s,
+            task.name,
+            task.max_attempts,
+            cancel_event,
+        )
+        future_map[future] = (index, task.name)
+        return True
+
+    try:
+        for _ in range(min(max_workers, len(normalized))):
+            submit_next()
+
+        while future_map:
+            future = next(concurrent.futures.as_completed(tuple(future_map)))
+            index, name = future_map[future]
+            del future_map[future]
             try:
-                result = f.result()
-                results.append((name, result))
-            except Exception as e:
-                errors.append(f"{name}: {e}")
+                results[index] = future.result()
+            except (concurrent.futures.CancelledError, ProcessCancelled):
+                if not cancel_event.is_set():
+                    raise
+            except Exception as exc:
+                if not errors:
+                    errors.append((index, f"{name}: {exc}"))
+                    cancel_event.set()
+                    for pending in future_map:
+                        pending.cancel()
+            if errors:
+                break
+            submit_next()
+    except BaseException:
+        cancel_event.set()
+        for future in future_map:
+            future.cancel()
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
     if errors:
-        raise RuntimeError("parallel collection failed: " + "; ".join(errors))
-    task_names = [t["name"] for t in tasks]
-    results.sort(key=lambda x: task_names.index(x[0]))
-    return [r[1] for r in results]
+        errors.sort()
+        raise RuntimeError("parallel collection failed: " + "; ".join(message for _, message in errors))
+    return results

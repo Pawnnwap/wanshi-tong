@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 .env
 wanshi_tong_*.md
+万事通日报_*.md
 config.json
 credentials.json
 .DS_Store

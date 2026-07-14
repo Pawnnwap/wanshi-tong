@@ -2,7 +2,7 @@ import unittest
 from datetime import date
 from unittest.mock import patch
 
-from reporters.feishu import _send_card_with_retry, cleanup_dates
+from reporters.feishu import FeishuReporter, _send_card_with_retry, cleanup_dates
 
 
 class CleanupDatesTest(unittest.TestCase):
@@ -111,6 +111,14 @@ class SendCardRetryTest(unittest.TestCase):
 
         self.assertEqual(send_card.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
+
+
+class FeishuReporterConfigTest(unittest.TestCase):
+    @patch("reporters.feishu.load_config", return_value={"feishu": {"max_chars_per_msg": 0}})
+    @patch("reporters.feishu._load_credentials", return_value={"feishu_webhook": "https://example.invalid"})
+    def test_rejects_non_positive_message_size(self, load_credentials, load_config):
+        with self.assertRaisesRegex(ValueError, "max_chars_per_msg must be at least 1"):
+            FeishuReporter().send("title", "content")
 
 
 if __name__ == "__main__":

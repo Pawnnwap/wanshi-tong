@@ -22,6 +22,8 @@
 
 所有组件通过 `pkgutil` 自动发现 —— 在 `modules/` 下新建 `.py` 文件即可，无需注册。
 
+运行职责按模块拆分：`core/context.py` 统一管理运行时间和日期模板，`core/pipeline.py` 编排组件，`core/process.py` 执行带空闲进度监控的子进程，`core/report.py` 负责报告渲染和日期清理。新闻和结构化数据采集器分别继承 `modules/news.py` 与 `modules/structured_data.py` 的共享提示词策略。
+
 ## 前置条件
 
 - **Python 3.10+**
@@ -58,7 +60,7 @@ pip install -r requirements.txt
 {
   "opencode": {
     "permissions": {},
-    "timeout_s": 600
+    "idle_timeout_s": 600
   },
   "parallel": {
     "max_workers": 5
@@ -71,9 +73,9 @@ pip install -r requirements.txt
 }
 ```
 
-如需飞书推送，创建 `credentials.json`：
+`opencode.idle_timeout_s` 是空闲超时：子进程只要有输出就会重置计时，不存在总运行时长限制。旧的 `timeout_s` 键仍作为兼容别名支持。
 
-`opencode.timeout_s` 是空闲超时：子进程只要有输出就会重置计时，不是总运行时长限制。
+如需飞书推送，创建 `credentials.json`：
 
 ```json
 {
@@ -118,28 +120,18 @@ python main.py
 在 `modules/` 下新建文件：
 
 ```python
-from core.base import Module, _DATE_RULES_ZH, _DATE_RULES_EN, _FORMAT_ZH, _FORMAT_EN
+from core.base import Module
 
 
 class MyModule(Module):
     name = "my_module"
     title = "My Title"
-    model = ""  # 空 = 尝试所有备用模型
-
-    prompt_zh = f"""
-你是...请搜索...的新闻。
-## 日期红线（必须遵守）
-{_DATE_RULES_ZH}
-{_FORMAT_ZH}"""
-
-    prompt_en = f"""
-You are... Search for... news.
-## Date Red Lines (MUST follow)
-{_DATE_RULES_EN}
-{_FORMAT_EN}"""
+    model = ""  # 空 = 使用配置中的默认模型
+    prompt_zh = "搜索{today_cn}发布的示例数据。输出中文并标注来源和日期。"
+    prompt_en = "Find example data published on {today_en}. Include source and date."
 ```
 
-无需注册——下次运行时自动发现。
+日期敏感新闻或表格数据可分别继承 `NewsModule` 或 `StructuredDataModule`，复用统一提示词策略。无需注册。
 
 ## 致谢
 

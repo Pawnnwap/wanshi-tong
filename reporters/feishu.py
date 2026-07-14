@@ -1,20 +1,18 @@
-import json
-import hashlib
 import base64
+import hashlib
 import hmac
+import json
 import time
-import re
+
 import requests
-from datetime import date, datetime, timedelta
 from pathlib import Path
+
 from core.base import Reporter
 from core.config import load_config
 from core.progress import sleep_with_progress
+from core.report import cleanup_dates
 
 CREDENTIALS_FILE = Path(__file__).resolve().parent.parent / "credentials.json"
-
-
-
 
 def _load_credentials():
     with open(CREDENTIALS_FILE, "r", encoding="utf-8") as f:
@@ -31,25 +29,37 @@ def _gen_sign(timestamp: int, secret: str) -> str:
     return base64.b64encode(h.digest()).decode("utf-8")
 
 
-def _send_card(webhook_url: str, secret: str, title: str, markdown: str, timeout_s: int = 30) -> dict:
-    timestamp = int(time.time())
-    card = {
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "template": "blue",
-        },
-        "elements": [
-            {"tag": "markdown", "content": markdown}
-        ],
-    }
+def _build_payload(timestamp: int, secret: str, title: str, markdown: str) -> dict:
     payload = {
         "timestamp": str(timestamp),
         "msg_type": "interactive",
-        "card": card,
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": "blue",
+            },
+            "elements": [{"tag": "markdown", "content": markdown}],
+        },
     }
     if secret:
         payload["sign"] = _gen_sign(timestamp, secret)
-    resp = requests.post(webhook_url, json=payload, timeout=(timeout_s, timeout_s))
+    return payload
+
+
+def _send_card(
+    webhook_url: str,
+    secret: str,
+    title: str,
+    markdown: str,
+    network_idle_timeout_s: int = 30,
+) -> dict:
+    timestamp = int(time.time())
+    payload = _build_payload(timestamp, secret, title, markdown)
+    resp = requests.post(
+        webhook_url,
+        json=payload,
+        timeout=(network_idle_timeout_s, network_idle_timeout_s),
+    )
     resp.raise_for_status()
     result = resp.json()
     result_code = result.get("code", result.get("StatusCode", 0))
@@ -77,55 +87,6 @@ def _send_card_with_retry(
     raise RuntimeError("unreachable")
 
 
-_CHINESE_DATE_RE = re.compile(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日")
-_ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
-
-
-def cleanup_dates(content: str, allowed_dates=None) -> str:
-    """Remove dated collection lines outside the window, preserving analysis text."""
-    if allowed_dates is None:
-        today = date.today()
-        allowed = {today - timedelta(days=1), today}
-    else:
-        allowed = {
-            value.date() if isinstance(value, datetime) else value
-            for value in allowed_dates
-        }
-
-    allowed_month_days = {(value.month, value.day) for value in allowed}
-
-    def has_disallowed_date(line: str) -> bool:
-        for year, month, day in _CHINESE_DATE_RE.findall(line):
-            if year:
-                try:
-                    value = date(int(year), int(month), int(day))
-                except ValueError:
-                    continue
-                if value not in allowed:
-                    return True
-            elif (int(month), int(day)) not in allowed_month_days:
-                return True
-
-        for year, month, day in _ISO_DATE_RE.findall(line):
-            try:
-                value = date(int(year), int(month), int(day))
-            except ValueError:
-                continue
-            if value not in allowed:
-                return True
-        return False
-
-    cleaned_lines = []
-    in_analysis = False
-    for line in content.splitlines():
-        if line.strip() == "## Deep Cross-Domain Analysis":
-            in_analysis = True
-        if in_analysis or not has_disallowed_date(line):
-            cleaned_lines.append(line)
-    cleaned = "\n".join(cleaned_lines)
-    return re.sub(r"\n{3,}", "\n\n", cleaned)
-
-
 class FeishuReporter(Reporter):
     name = "feishu"
 
@@ -142,6 +103,8 @@ class FeishuReporter(Reporter):
             raise ValueError("feishu_webhook not found in credentials.json")
         if max_attempts < 1:
             raise ValueError("feishu.max_attempts must be at least 1")
+        if max_chars < 1:
+            raise ValueError("feishu.max_chars_per_msg must be at least 1")
 
         parts = self._split(content, max_chars)
 
@@ -157,24 +120,12 @@ class FeishuReporter(Reporter):
             )
             if i < len(parts) - 1:
                 sleep_with_progress(1, f"feishu next message {i + 2}/{len(parts)}")
-        return
-
     @staticmethod
     def _split(text: str, max_chars: int) -> list[str]:
         parts = []
         remaining = text
         while len(remaining) > max_chars:
-            break_at = remaining.rfind("\n## ", 0, max_chars)
-            if break_at > max_chars // 2:
-                parts.append(remaining[:break_at])
-                remaining = remaining[break_at:]
-                continue
-            break_at = remaining.rfind("\n\n", 0, max_chars)
-            if break_at > max_chars // 2:
-                parts.append(remaining[:break_at])
-                remaining = remaining[break_at:]
-                continue
-            break_at = remaining.rfind("\n", 0, max_chars)
+            break_at = _find_breakpoint(remaining, max_chars)
             if break_at > 0:
                 parts.append(remaining[:break_at])
                 remaining = remaining[break_at:]
@@ -184,3 +135,11 @@ class FeishuReporter(Reporter):
         if remaining.strip():
             parts.append(remaining)
         return parts
+
+
+def _find_breakpoint(text: str, max_chars: int) -> int:
+    for separator, minimum in (("\n## ", max_chars // 2), ("\n\n", max_chars // 2), ("\n", 0)):
+        breakpoint = text.rfind(separator, 0, max_chars)
+        if breakpoint > minimum:
+            return breakpoint
+    return -1
