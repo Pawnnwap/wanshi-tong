@@ -10,22 +10,22 @@ class OpenCodeFailureTest(unittest.TestCase):
     def test_process_idle_timeout_resets_on_output(self):
         script = (
             "import json, sys, time\n"
-            "for part in ['one', 'two']:\n"
+            "for part in ['one', 'two', 'three', 'four']:\n"
             "    print(json.dumps({'type': 'text', 'part': {'text': part}}), flush=True)\n"
-            "    time.sleep(0.2)\n"
+            "    time.sleep(0.25)\n"
         )
 
         stdout, stderr, returncode = _run_process_with_idle_progress(
             [sys.executable, "-c", script],
             "",
-            1,
+            0.6,
             "test progress",
             os.environ.copy(),
         )
 
         self.assertEqual(returncode, 0)
         self.assertEqual(stderr, [])
-        self.assertEqual(len(stdout), 2)
+        self.assertEqual(len(stdout), 4)
 
     @patch("core.config.load_config", return_value={"opencode": {"model": "agnes/agnes-2.0-flash"}})
     @patch("core.opencode_client._run_single", return_value=("result", True))

@@ -73,6 +73,8 @@ pip install -r requirements.txt
 
 如需飞书推送，创建 `credentials.json`：
 
+`opencode.timeout_s` 是空闲超时：子进程只要有输出就会重置计时，不是总运行时长限制。
+
 ```json
 {
   "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_HOOK_ID",

@@ -38,7 +38,7 @@ def _reader_thread(pipe, stream_name: str, output: queue.Queue) -> None:
 def _run_process_with_idle_progress(
     cmd: list[str],
     input_text: str,
-    timeout_s: int,
+    idle_timeout_s: int,
     label: str,
     env: dict,
 ) -> tuple[list[str], list[str], int]:
@@ -64,7 +64,7 @@ def _run_process_with_idle_progress(
 
     stdout_lines = []
     stderr_lines = []
-    progress = ProgressBar(label, timeout_s)
+    progress = ProgressBar(label, idle_timeout_s)
     try:
         while True:
             try:
@@ -77,7 +77,7 @@ def _run_process_with_idle_progress(
                     proc.kill()
                     proc.wait()
                     progress.close("timeout")
-                    raise subprocess.TimeoutExpired(cmd, timeout_s)
+                    raise subprocess.TimeoutExpired(cmd, idle_timeout_s)
                 continue
 
             progress.mark_progress()
@@ -139,7 +139,7 @@ def update_opencode():
     except FileNotFoundError:
         print("[upgrade] WARNING: opencode command not found, skipping upgrade")
     except subprocess.TimeoutExpired:
-        print("[upgrade] WARNING: opencode upgrade timed out (60s), skipping")
+        print("[upgrade] WARNING: opencode upgrade had no output for 60s, skipping")
     except Exception as e:
         print(f"[更新] 警告: opencode upgrade 失败: {e}")
 def _run_single(prompt: str, model: str, timeout_s: int, label: str, max_attempts: int = 0) -> tuple[str, bool]:

@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from core.base import Reporter
 from core.config import load_config
-from core.progress import run_with_progress_timeout, sleep_with_progress
+from core.progress import sleep_with_progress
 
 CREDENTIALS_FILE = Path(__file__).resolve().parent.parent / "credentials.json"
 
@@ -49,11 +49,7 @@ def _send_card(webhook_url: str, secret: str, title: str, markdown: str, timeout
     }
     if secret:
         payload["sign"] = _gen_sign(timestamp, secret)
-    resp = run_with_progress_timeout(
-        lambda: requests.post(webhook_url, json=payload, timeout=timeout_s),
-        timeout_s,
-        f"feishu send: {title}",
-    )
+    resp = requests.post(webhook_url, json=payload, timeout=(timeout_s, timeout_s))
     resp.raise_for_status()
     result = resp.json()
     result_code = result.get("code", result.get("StatusCode", 0))

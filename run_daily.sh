@@ -9,7 +9,7 @@ PYTHON_BIN="${WANSHI_TONG_PYTHON_BIN:-/usr/bin/python3}"
 MAIN_SCRIPT="${WANSHI_TONG_MAIN_SCRIPT:-$PROJECT_DIR/main.py}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 RETRY_DELAY_SECONDS="${RETRY_DELAY_SECONDS:-600}"
-ATTEMPT_TIMEOUT_SECONDS="${ATTEMPT_TIMEOUT_SECONDS:-7200}"
+ATTEMPT_IDLE_TIMEOUT_SECONDS="${ATTEMPT_IDLE_TIMEOUT_SECONDS:-${ATTEMPT_TIMEOUT_SECONDS:-7200}}"
 
 export HOME="/home/aaa"
 export PATH="/home/aaa/.opencode/bin:/usr/local/bin:/usr/bin:/bin"
@@ -69,10 +69,10 @@ run_attempt_with_progress() {
 
         idle=$((now - last_progress_ts))
         elapsed=$((now - start_ts))
-        render_progress_bar "attempt $attempt/$MAX_ATTEMPTS" "$idle" "$ATTEMPT_TIMEOUT_SECONDS" "$elapsed"
-        if (( idle >= ATTEMPT_TIMEOUT_SECONDS )); then
+        render_progress_bar "attempt $attempt/$MAX_ATTEMPTS" "$idle" "$ATTEMPT_IDLE_TIMEOUT_SECONDS" "$elapsed"
+        if (( idle >= ATTEMPT_IDLE_TIMEOUT_SECONDS )); then
             printf '\n'
-            log "Attempt $attempt made no output progress for ${ATTEMPT_TIMEOUT_SECONDS}s; terminating."
+            log "Attempt $attempt made no output progress for ${ATTEMPT_IDLE_TIMEOUT_SECONDS}s; terminating."
             kill -TERM "$child_pid" 2>/dev/null || true
             sleep 60 &
             local grace_pid=$!
@@ -189,7 +189,7 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     fi
 
     if (( exit_code == 124 )); then
-        log "Attempt $attempt exceeded ${ATTEMPT_TIMEOUT_SECONDS}s."
+        log "Attempt $attempt hit idle timeout after ${ATTEMPT_IDLE_TIMEOUT_SECONDS}s without output progress."
     else
         log "Attempt $attempt failed with exit code $exit_code."
     fi

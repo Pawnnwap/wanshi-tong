@@ -73,6 +73,8 @@ Create config.json in the project root:
 
 For Feishu delivery, create credentials.json:
 
+`opencode.timeout_s` is an idle timeout: it resets whenever the subprocess emits output. It is not a total runtime limit.
+
 ```json
 {
   "feishu_webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_HOOK_ID",

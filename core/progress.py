@@ -1,10 +1,5 @@
-import concurrent.futures
 import sys
 import time
-
-
-class ProgressTimeoutError(TimeoutError):
-    pass
 
 
 class ProgressBar:
@@ -70,27 +65,3 @@ def sleep_with_progress(seconds: float, label: str) -> None:
         progress.close("stopped")
         raise
 
-
-def run_with_progress_timeout(func, timeout_s: float, label: str):
-    progress = ProgressBar(label, timeout_s)
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(func)
-    try:
-        while True:
-            try:
-                result = future.result(timeout=1)
-            except concurrent.futures.TimeoutError:
-                progress.render()
-                if progress.timed_out():
-                    progress.close("timeout")
-                    future.cancel()
-                    raise ProgressTimeoutError(f"{label}: no progress for {timeout_s}s")
-                continue
-            except BaseException:
-                progress.close("failed")
-                raise
-            progress.mark_progress()
-            progress.close("done")
-            return result
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
