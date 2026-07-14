@@ -22,6 +22,107 @@ log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$*"
 }
 
+render_progress_bar() {
+    local label="$1"
+    local idle="$2"
+    local timeout="$3"
+    local elapsed="$4"
+    local width=24
+    if (( timeout < 1 )); then
+        timeout=1
+    fi
+    local filled=$(( idle * width / timeout ))
+    if (( filled > width )); then
+        filled=$width
+    fi
+    local empty=$(( width - filled ))
+    printf '\r['
+    printf '%*s' "$filled" '' | tr ' ' '#'
+    printf '%*s' "$empty" '' | tr ' ' '-'
+    printf '] %s idle=%ss/%ss elapsed=%ss' "$label" "$idle" "$timeout" "$elapsed"
+}
+
+run_attempt_with_progress() {
+    local attempt="$1"
+    local attempt_log="$LOG_DIR/attempt_${$}_${attempt}.log"
+    local start_ts last_progress_ts now idle elapsed size last_size exit_code proc_state
+    : >"$attempt_log"
+
+    "$PYTHON_BIN" "$MAIN_SCRIPT" >"$attempt_log" 2>&1 &
+    local child_pid=$!
+    start_ts=$(date +%s)
+    last_progress_ts=$start_ts
+    last_size=0
+
+    while kill -0 "$child_pid" 2>/dev/null; do
+        proc_state=$(ps -p "$child_pid" -o stat= 2>/dev/null || true)
+        if [[ "$proc_state" == Z* ]]; then
+            break
+        fi
+        now=$(date +%s)
+        size=$(stat -c '%s' "$attempt_log" 2>/dev/null || printf '0')
+        if (( size > last_size )); then
+            tail -c +"$((last_size + 1))" "$attempt_log"
+            last_size=$size
+            last_progress_ts=$now
+        fi
+
+        idle=$((now - last_progress_ts))
+        elapsed=$((now - start_ts))
+        render_progress_bar "attempt $attempt/$MAX_ATTEMPTS" "$idle" "$ATTEMPT_TIMEOUT_SECONDS" "$elapsed"
+        if (( idle >= ATTEMPT_TIMEOUT_SECONDS )); then
+            printf '\n'
+            log "Attempt $attempt made no output progress for ${ATTEMPT_TIMEOUT_SECONDS}s; terminating."
+            kill -TERM "$child_pid" 2>/dev/null || true
+            sleep 60 &
+            local grace_pid=$!
+            while kill -0 "$child_pid" 2>/dev/null && kill -0 "$grace_pid" 2>/dev/null; do
+                proc_state=$(ps -p "$child_pid" -o stat= 2>/dev/null || true)
+                if [[ "$proc_state" == Z* ]]; then
+                    break
+                fi
+                sleep 1
+            done
+            kill "$grace_pid" 2>/dev/null || true
+            if kill -0 "$child_pid" 2>/dev/null; then
+                kill -KILL "$child_pid" 2>/dev/null || true
+            fi
+            wait "$child_pid" 2>/dev/null || true
+            rm -f "$attempt_log"
+            return 124
+        fi
+        sleep 1
+    done
+
+    wait "$child_pid"
+    exit_code=$?
+    size=$(stat -c '%s' "$attempt_log" 2>/dev/null || printf '0')
+    if (( size > last_size )); then
+        tail -c +"$((last_size + 1))" "$attempt_log"
+    fi
+    printf '\n'
+    rm -f "$attempt_log"
+    return "$exit_code"
+}
+
+sleep_with_progress() {
+    local seconds="$1"
+    local label="$2"
+    local start_ts now elapsed remaining
+    start_ts=$(date +%s)
+    while true; do
+        now=$(date +%s)
+        elapsed=$((now - start_ts))
+        if (( elapsed >= seconds )); then
+            printf '\r[done] %s elapsed=%ss\n' "$label" "$elapsed"
+            return 0
+        fi
+        remaining=$((seconds - elapsed))
+        render_progress_bar "$label" "$elapsed" "$seconds" "$elapsed"
+        sleep 1
+    done
+}
+
 cleanup_logs() {
     find "$LOG_DIR" -maxdepth 1 -type f -name 'run_*.log' -printf '%T@ %p\n' \
         | sort -nr \
@@ -77,11 +178,7 @@ cd "$PROJECT_DIR" || {
 exit_code=1
 for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
     log "Starting attempt $attempt/$MAX_ATTEMPTS."
-    /usr/bin/timeout \
-        --signal=TERM \
-        --kill-after=60s \
-        "${ATTEMPT_TIMEOUT_SECONDS}s" \
-        "$PYTHON_BIN" "$MAIN_SCRIPT"
+    run_attempt_with_progress "$attempt"
     exit_code=$?
 
     if (( exit_code == 0 )); then
@@ -99,7 +196,7 @@ for ((attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)); do
 
     if (( attempt < MAX_ATTEMPTS )); then
         log "Retrying in ${RETRY_DELAY_SECONDS}s."
-        /usr/bin/sleep "$RETRY_DELAY_SECONDS"
+        sleep_with_progress "$RETRY_DELAY_SECONDS" "retry delay"
     fi
 done
 

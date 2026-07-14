@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from core.base import Reporter
 from core.config import load_config
+from core.progress import run_with_progress_timeout, sleep_with_progress
 
 CREDENTIALS_FILE = Path(__file__).resolve().parent.parent / "credentials.json"
 
@@ -30,7 +31,7 @@ def _gen_sign(timestamp: int, secret: str) -> str:
     return base64.b64encode(h.digest()).decode("utf-8")
 
 
-def _send_card(webhook_url: str, secret: str, title: str, markdown: str) -> dict:
+def _send_card(webhook_url: str, secret: str, title: str, markdown: str, timeout_s: int = 30) -> dict:
     timestamp = int(time.time())
     card = {
         "header": {
@@ -48,7 +49,11 @@ def _send_card(webhook_url: str, secret: str, title: str, markdown: str) -> dict
     }
     if secret:
         payload["sign"] = _gen_sign(timestamp, secret)
-    resp = requests.post(webhook_url, json=payload, timeout=30)
+    resp = run_with_progress_timeout(
+        lambda: requests.post(webhook_url, json=payload, timeout=timeout_s),
+        timeout_s,
+        f"feishu send: {title}",
+    )
     resp.raise_for_status()
     result = resp.json()
     result_code = result.get("code", result.get("StatusCode", 0))
@@ -72,7 +77,7 @@ def _send_card_with_retry(
         except Exception:
             if attempt == max_attempts:
                 raise
-            time.sleep(retry_delay_s * (2 ** (attempt - 1)))
+            sleep_with_progress(retry_delay_s * (2 ** (attempt - 1)), f"feishu retry {attempt + 1}/{max_attempts}")
     raise RuntimeError("unreachable")
 
 
@@ -81,7 +86,7 @@ _ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
 
 
 def cleanup_dates(content: str, allowed_dates=None) -> str:
-    """Remove lines with explicit dates outside the collection window."""
+    """Remove dated collection lines outside the window, preserving analysis text."""
     if allowed_dates is None:
         today = date.today()
         allowed = {today - timedelta(days=1), today}
@@ -114,10 +119,14 @@ def cleanup_dates(content: str, allowed_dates=None) -> str:
                 return True
         return False
 
-    cleaned = "\n".join(
-        line for line in content.splitlines()
-        if not has_disallowed_date(line)
-    )
+    cleaned_lines = []
+    in_analysis = False
+    for line in content.splitlines():
+        if line.strip() == "## Deep Cross-Domain Analysis":
+            in_analysis = True
+        if in_analysis or not has_disallowed_date(line):
+            cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines)
     return re.sub(r"\n{3,}", "\n\n", cleaned)
 
 
@@ -151,7 +160,7 @@ class FeishuReporter(Reporter):
                 retry_delay_s,
             )
             if i < len(parts) - 1:
-                time.sleep(1)
+                sleep_with_progress(1, f"feishu next message {i + 2}/{len(parts)}")
         return
 
     @staticmethod

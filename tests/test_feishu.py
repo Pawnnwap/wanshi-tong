@@ -58,9 +58,21 @@ class CleanupDatesTest(unittest.TestCase):
             "## 标题\n\n新闻 | 2026年6月29日",
         )
 
+    def test_preserves_deep_analysis_lines_with_older_citation_dates(self):
+        content = (
+            "新闻 | 2026年6月6日\n"
+            "## Deep Cross-Domain Analysis\n"
+            "（1）背离分析引用 2026年6月6日 的历史背景。"
+        )
+
+        self.assertEqual(
+            cleanup_dates(content, self.allowed_dates),
+            "## Deep Cross-Domain Analysis\n（1）背离分析引用 2026年6月6日 的历史背景。",
+        )
+
 
 class SendCardRetryTest(unittest.TestCase):
-    @patch("reporters.feishu.time.sleep")
+    @patch("reporters.feishu.sleep_with_progress")
     @patch("reporters.feishu._send_card")
     def test_retries_with_exponential_backoff(self, send_card, sleep):
         send_card.side_effect = [
@@ -82,7 +94,7 @@ class SendCardRetryTest(unittest.TestCase):
         self.assertEqual(send_card.call_count, 3)
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4])
 
-    @patch("reporters.feishu.time.sleep")
+    @patch("reporters.feishu.sleep_with_progress")
     @patch("reporters.feishu._send_card")
     def test_raises_after_last_attempt(self, send_card, sleep):
         send_card.side_effect = RuntimeError("permanent")
