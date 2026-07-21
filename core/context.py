@@ -37,6 +37,8 @@ class RunContext:
             "today_day": str(today.day),
             "month_en": today.strftime("%B"),
             "year": str(today.year),
+            "today_digits": today.strftime("%Y%m%d"),
+            "yesterday_digits": yesterday.strftime("%Y%m%d"),
         }
 
     @property

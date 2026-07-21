@@ -2,22 +2,13 @@ from dataclasses import replace
 
 from core.base import Filter, ModuleResult
 from core.opencode_client import run_opencode
-from modules.catalog import MACRO_ITEMS_ZH
 
 
 class ImportanceFilter(Filter):
     name = "importance_filter"
     model = ""
 
-    STRUCTURED_MODULES = {
-        "macro_data": (
-            "整理宏观数据：合并中英文结果，去重，保留最新可核验数据；"
-            "不要按新闻重要性丢弃宏观指标。\n"
-            f"必须尽量覆盖：{MACRO_ITEMS_ZH}。\n"
-            "输出中文表格，格式：指标名称 | 最新值 | 数据日期（精确到日）| 来源。\n"
-            "旧数据可保留并标注“旧数据”；缺失项写“未取得”，禁止编造发布日期。"
-        ),
-    }
+    STRUCTURED_MODULES: dict[str, str] = {}
 
     @classmethod
     def _build_prompt(cls, module_result: ModuleResult) -> str:

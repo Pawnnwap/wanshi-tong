@@ -1,25 +1,39 @@
-from modules.catalog import MACRO_ITEMS_EN, MACRO_ITEMS_ZH
-from modules.structured_data import StructuredDataModule
+"""Chinese macro data, collected deterministically via East Money API.
+
+Replaces the former agentic (LLM + MCP tool) approach, which relied on
+jin10.com via akshare (data became stale by Aug-Sep 2025) and was prone
+to LLM hallucination on exact dates. Now pulls current data directly
+from the East Money datacenter, validated through June 2026.
+
+Covered: CPI, PPI, PMI (mfg + non-mfg), GDP, M2/M1/M0, forex reserves,
+gold reserves, trade (exports/imports), new RMB loans.
+"""
+
+from typing import Mapping
+
+from core.base import LocalModule, ModuleResult
+from modules.macros_china import collect_indicators, render_table
 
 
-class MacroDataModule(StructuredDataModule):
+class MacroDataModule(LocalModule):
     name = "macro_data"
     title = "【宏观最新数据与指标】"
-    task_idle_timeout_s = 600
-    task_max_attempts = 1
-    request_zh = "快速整理截至{today_cn}可核验的核心宏观数据。"
-    request_en = "Quickly compile core macro data verifiable as of {today_en}."
-    rules_zh = (
-        "只做一次金融/宏观数据工具查询，不要逐项 websearch。",
-        "最多18行；找不到就写“未取得”，不要反复搜索。",
-        "禁止编造发布日期；月度/季度指标写发布日或标注“旧数据”。",
-        f"覆盖：{MACRO_ITEMS_ZH}。",
-    )
-    rules_en = (
-        "Make one financial/macro data tool query; do not web-search indicators one by one.",
-        'Return at most 18 rows; if unavailable quickly, write "not found" and move on.',
-        'Never fabricate publication dates; mark older releases as "(old data)".',
-        f"Cover: {MACRO_ITEMS_EN}.",
-    )
-    output_zh = "输出中文。格式：指标名称 | 最新值 | 数据日期（精确到日）| 来源"
-    output_en = "Output in English. Format: Indicator | Latest Value | Data Date (exact day) | Source"
+
+    def collect(self, date_templates: Mapping[str, str] | None = None) -> ModuleResult:
+        results = collect_indicators(log=self._log)
+        content = render_table(results)
+        failed = [r.definition.key for r in results if r.error is not None]
+        error = None
+        if len(failed) == len(results):
+            error = "macro data collection failed for all indicators"
+        return ModuleResult(
+            name=self.name,
+            title=self.title,
+            content=content,
+            error=error,
+            authoritative=True,
+        )
+
+    @staticmethod
+    def _log(message: str) -> None:
+        print(message, flush=True)
