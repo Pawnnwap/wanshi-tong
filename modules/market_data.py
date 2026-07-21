@@ -4,25 +4,31 @@ This module replaces the previous agentic (LLM + MCP tool) approach to asset
 prices, which failed unreliably. Everything here is deterministic Python.
 
 Each asset has an ordered list of `Source`s spanning *different hosts* -- Tencent
-(gu.qq.com), Sina, East Money, CFETS, Kraken -- tried until one returns data, so
-no single provider (notably East Money, which rate-limits aggressively) is a
-single point of failure. From the resulting daily history we derive interpretable
-relative metrics: absolute change, daily change %, and where the latest close sits
-inside its own 20-day / 60-day / 1-year distribution, so the downstream analyzer
-can reason about position and extremes, not just raw numbers.
+(gu.qq.com), Sina, East Money, CFETS, Binance public-data mirror, Gate.io --
+tried until one returns data, so no single provider (notably East Money, which
+rate-limits aggressively) is a single point of failure. From the resulting daily
+history we derive interpretable relative metrics: absolute change, daily change %,
+and where the latest close sits inside its own 20-day / 60-day / 1-year
+distribution, so the downstream analyzer can reason about position and extremes,
+not just raw numbers.
 
 Every source is reachable from mainland China; none is yfinance (blocked there).
+The Dollar Index (DXY) has no public historical source reachable from China, so
+it is computed from the six CFETS spot component pairs via the ICE formula.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import requests
+
+from core.timed_thread import run_with_timeout
 
 # akshare is imported lazily inside the fetchers so component discovery stays
 # fast and does not require the network just to import this file.
@@ -36,10 +42,28 @@ STALE_DAYS = 12  # reject data older than this (guards against frozen endpoints;
 #                  wide enough to tolerate long holidays like Chinese New Year)
 MIN_PERCENTILE_POINTS = 10  # need at least this many points for a 1y percentile
 HTTP_TIMEOUT_S = 15
-SOCKET_TIMEOUT_S = 20  # global cap so a stalled host can't hang the whole run
+SOCKET_TIMEOUT_S = 20  # global cap so a stalled host cannot hang the whole run
+THREAD_TIMEOUT_S = 60  # per-asset wall-clock cap to guard against DNS hangs
 _UA = {"User-Agent": "Mozilla/5.0 (compatible; wanshi-tong/1.0)"}
-KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
+BINANCE_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
+GATEIO_CANDLES_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
 TENCENT_KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
+# ICE US Dollar Index (DXY) coefficients. No public DXY history endpoint is
+# reachable from mainland China, so we synthesize the spot value from its six
+# CFETS-quoted component pairs via the official ICE weighted geometric formula.
+_DXY_CONSTANT = 50.14348112
+# Exponent sign follows USD's role in each pair: negative when USD is the quote
+# currency (EUR/USD, GBP/USD -- a higher rate means a weaker USD), positive when
+# USD is the base currency (USD/JPY, USD/CAD, USD/SEK, USD/CHF -- a higher rate
+# means a stronger USD). Absolute weights sum to 1.0.
+_DXY_WEIGHTS = {
+    "EUR/USD": -0.576,
+    "USD/JPY": 0.136,
+    "GBP/USD": -0.119,
+    "USD/CAD": 0.091,
+    "USD/SEK": 0.042,
+    "USD/CHF": 0.036,
+}
 
 
 @dataclass(frozen=True)
@@ -67,11 +91,13 @@ def S(kind: str, symbol: str) -> Source:
 # particular East Money, which rate-limits aggressively) is a single point of
 # failure. Order = priority; the first source that returns data wins.
 #   Hosts: tencent = qq.com, em = eastmoney.com, sina = *.sina.com.cn,
-#          cfets = chinamoney.com.cn, kraken = api.kraken.com.
+#          cfets = chinamoney.com.cn, binance = data-api.binance.vision,
+#          gateio = api.gateio.ws.
 # China / HK / US indices and forex are fetched with NO Sina involvement
 # (Tencent + East Money + CFETS). Europe/Japan indices and commodities have no
 # third China-accessible source in akshare, so Sina is unavoidable there; East
 # Money is their fallback (or primary, for commodities via the EM alternative).
+# DXY is synthesized from CFETS spot component pairs (no direct source in China).
 # Ordering of ASSETS also defines the row order in the rendered table.
 ASSETS: tuple[Asset, ...] = (
     # --- China A-share indices: Tencent primary, East Money fallback ---
@@ -103,9 +129,10 @@ ASSETS: tuple[Asset, ...] = (
           (S("index_global_sina", "英国富时100指数"), S("index_em", "英国富时100"))),
     Asset("cac", "法国CAC40", "CAC 40",
           (S("index_global_sina", "法CAC40指数"), S("index_em", "法国CAC40"))),
-    # --- Dollar index: East Money only (no clean non-EM history source) ---
+    # --- Dollar index: synthesized from CFETS spot component pairs via ICE
+    #     formula. No public DXY history endpoint is reachable from China. ---
     Asset("dxy", "美元指数", "Dollar Index (DXY)",
-          (S("index_em", "美元指数"),)),
+          (S("cfets_dxy", ""),)),
     # --- Forex: East Money history; CFETS spot as last resort (no Sina) ---
     Asset("usdcny", "美元人民币", "USD/CNY",
           (S("forex_em", "USDCNYC"), S("cfets_spot", "USD/CNY"))),
@@ -121,9 +148,13 @@ ASSETS: tuple[Asset, ...] = (
     Asset("brent", "布伦特原油", "Brent Crude", (S("foreign_futures", "OIL"),), "USD/bbl"),
     Asset("wti", "WTI原油", "WTI Crude", (S("foreign_futures", "CL"),), "USD/bbl"),
     Asset("copper", "铜", "Copper (COMEX)", (S("foreign_futures", "HG"),), "USD/lb"),
-    # --- Crypto: Kraken public API, USD daily OHLC ---
-    Asset("btc", "比特币", "Bitcoin", (S("kraken", "XBTUSD"),)),
-    Asset("eth", "以太坊", "Ethereum", (S("kraken", "ETHUSD"),)),
+    # --- Crypto: Binance public-data mirror (primary) + Gate.io (fallback).
+    #     api.binance.com is IP-blocked in China, but data-api.binance.vision is
+    #     a separate public data-only mirror reachable from the mainland. ---
+    Asset("btc", "比特币", "Bitcoin",
+          (S("binance", "BTCUSDT"), S("gateio", "BTC_USDT"))),
+    Asset("eth", "以太坊", "Ethereum",
+          (S("binance", "ETHUSDT"), S("gateio", "ETH_USDT"))),
 )
 
 
@@ -219,28 +250,35 @@ def _fetch_history(asset: Asset) -> list[tuple[date, float]]:
     raise RuntimeError("; ".join(errors))
 
 
+# Source dispatch. Direct-HTTP kinds map to a fetcher taking the symbol; akshare
+# kinds map to the akshare function name whose dataframe is normalized by
+# _to_series. Adding a source is a one-line entry in the matching table.
+_DIRECT_FETCHERS: dict[str, Callable[[str], list[tuple[date, float]]]] = {
+    "binance": lambda symbol: _fetch_binance(symbol),
+    "gateio": lambda symbol: _fetch_gateio(symbol),
+    "tencent": lambda symbol: _fetch_tencent_kline(symbol),
+    "cfets_spot": lambda symbol: _fetch_cfets_spot(symbol),
+    "cfets_dxy": lambda symbol: _fetch_cfets_dxy(),
+}
+_AKSHARE_FUNCS: dict[str, str] = {
+    "index_hk_em": "stock_hk_index_daily_em",
+    "index_global_sina": "index_global_hist_sina",
+    "index_em": "index_global_hist_em",  # East Money global-index endpoint
+    "index_global": "index_global_hist_em",
+    "forex_em": "forex_hist_em",
+    "foreign_futures": "futures_foreign_hist",
+}
+
+
 def _fetch_source(source: Source) -> list[tuple[date, float]]:
     """Fetch one (kind, symbol) into ascending [(date, close)]."""
     kind, symbol = source.kind, source.symbol
-    if kind == "kraken":
-        return _fetch_kraken(symbol)
-    if kind == "tencent":
-        return _fetch_tencent_kline(symbol)
-    if kind == "cfets_spot":
-        return _fetch_cfets_spot(symbol)
+    if kind in _DIRECT_FETCHERS:
+        return _DIRECT_FETCHERS[kind](symbol)
+    if kind in _AKSHARE_FUNCS:
+        import akshare as ak
 
-    import akshare as ak
-
-    if kind == "index_hk_em":
-        return _to_series(ak.stock_hk_index_daily_em(symbol=symbol))
-    if kind == "index_global_sina":
-        return _to_series(ak.index_global_hist_sina(symbol=symbol))
-    if kind in ("index_em", "index_global"):  # East Money global-index endpoint
-        return _to_series(ak.index_global_hist_em(symbol=symbol))
-    if kind == "forex_em":
-        return _to_series(ak.forex_hist_em(symbol=symbol))
-    if kind == "foreign_futures":
-        return _to_series(ak.futures_foreign_hist(symbol=symbol))
+        return _to_series(getattr(ak, _AKSHARE_FUNCS[kind])(symbol=symbol))
     raise ValueError(f"unknown source kind: {kind}")
 
 
@@ -272,43 +310,108 @@ def _fetch_tencent_kline(symbol: str) -> list[tuple[date, float]]:
     return sorted(series)
 
 
-def _fetch_cfets_spot(pair: str) -> list[tuple[date, float]]:
-    """CFETS spot rate (chinamoney.com.cn) -- a single point (no history),
-    used as a last resort. Covers CNY pairs and major crosses."""
+def _cfets_mids(pairs: Sequence[str]) -> dict[str, float]:
+    """Look up the mid price of each requested pair across CFETS's two spot
+    tables (chinamoney.com.cn). Pairs not quoted are simply absent from the result."""
     import akshare as ak
 
+    mids: dict[str, float] = {}
     for fetch in (ak.fx_spot_quote, ak.fx_pair_quote):
+        if all(pair in mids for pair in pairs):
+            break
         try:
             df = fetch()
         except Exception:  # noqa: BLE001 -- try the other CFETS table
             continue
-        match = df[df["货币对"] == pair]
-        if not match.empty:
-            row = match.iloc[0]
-            mid = (float(row["买报价"]) + float(row["卖报价"])) / 2.0
-            return [(date.today(), mid)]
-    raise RuntimeError(f"cfets: {pair} not quoted")
+        for pair in pairs:
+            if pair in mids:
+                continue
+            match = df[df["货币对"] == pair]
+            if not match.empty:
+                row = match.iloc[0]
+                mids[pair] = (float(row["买报价"]) + float(row["卖报价"])) / 2.0
+    return mids
 
 
-def _fetch_kraken(pair: str) -> list[tuple[date, float]]:
-    """Daily USD OHLC from Kraken's public API -> ascending [(date, close)]."""
+def _fetch_cfets_spot(pair: str) -> list[tuple[date, float]]:
+    """CFETS spot rate -- a single point (no history), used as a last resort.
+    Covers CNY pairs and major crosses."""
+    mids = _cfets_mids([pair])
+    if pair not in mids:
+        raise RuntimeError(f"cfets: {pair} not quoted")
+    return [(date.today(), mids[pair])]
+
+
+def _fetch_binance(symbol: str) -> list[tuple[date, float]]:
+    """Daily close history from the Binance public-data mirror.
+
+    `data-api.binance.vision` is a public data-only mirror that is reachable
+    from mainland China, unlike `api.binance.com` (IP-blocked there). Returns
+    klines as `[openTime, open, high, low, close, volume, closeTime, ...]`.
+    """
     response = requests.get(
-        KRAKEN_OHLC_URL,
-        params={"pair": pair, "interval": 1440},
+        BINANCE_KLINES_URL,
+        params={"symbol": symbol, "interval": "1d", "limit": 500},
         headers=_UA,
         timeout=HTTP_TIMEOUT_S,
     )
     response.raise_for_status()
-    payload = response.json()
-    if payload.get("error"):
-        raise RuntimeError(f"kraken error: {payload['error']}")
-    result = payload.get("result", {})
-    candles = next((value for key, value in result.items() if key != "last"), [])
+    candles = response.json()
+    # Each candle: [openTime(ms), open, high, low, close, volume, closeTime, ...];
+    # close is index 4. Binance daily klines use UTC open time.
     series = [
-        (datetime.utcfromtimestamp(int(candle[0])).date(), float(candle[4]))
+        (datetime.utcfromtimestamp(int(candle[0]) / 1000).date(), float(candle[4]))
         for candle in candles
     ]
     return sorted(series)
+
+
+def _fetch_gateio(symbol: str) -> list[tuple[date, float]]:
+    """Daily close history from Gate.io's public candlestick API.
+
+    `api.gateio.ws` is reachable from mainland China. Returns candlesticks as
+    `[[timestamp(s), vol_quote, open, high, low, close, vol_base, complete], ...]`.
+    """
+    response = requests.get(
+        GATEIO_CANDLES_URL,
+        params={"currency_pair": symbol, "interval": "1d", "limit": 500},
+        headers=_UA,
+        timeout=HTTP_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    candles = response.json()
+    # Each candle: [timestamp(s), quote_vol, close, high, low, open, base_vol,
+    # closed]; close is index 2 (NOT 5 -- Gate.io orders close/high/low/open).
+    # Gate.io daily candles use UTC seconds.
+    series = [
+        (datetime.utcfromtimestamp(int(candle[0])).date(), float(candle[2]))
+        for candle in candles
+    ]
+    return sorted(series)
+
+
+def _fetch_cfets_dxy() -> list[tuple[date, float]]:
+    """Synthesize the Dollar Index (DXY) from CFETS spot component pairs.
+
+    No public DXY history endpoint is reachable from mainland China. CFETS
+    (chinamoney.com.cn) quotes all six ICE-formula component pairs live, so we
+    derive the spot DXY via the standard ICE weighted geometric mean:
+
+        DXY = 50.14348112 * EURUSD^-0.576 * USDJPY^0.136 * GBPUSD^-0.119
+                                * USDCAD^0.091 * USDSEK^0.042 * USDCHF^0.036
+
+    Returns a single (date.today(), dxy) point, so percentile metrics will be
+    blank (like other spot-only fallbacks) but the latest value and date populate.
+    """
+    mids = _cfets_mids(list(_DXY_WEIGHTS))
+    missing = [p for p in _DXY_WEIGHTS if p not in mids]
+    if missing:
+        raise RuntimeError(f"cfets_dxy: missing {missing}")
+
+    dxy = _DXY_CONSTANT
+    for pair, weight in _DXY_WEIGHTS.items():
+        dxy *= mids[pair] ** weight
+    return [(date.today(), dxy)]
 
 
 # --------------------------------------------------------------------------- #
@@ -374,8 +477,13 @@ def collect_metrics(log: Optional[Callable[[str], None]] = None) -> list[Metrics
     try:
         for asset in ASSETS:
             try:
-                series = _fetch_history(asset)
+                series = run_with_timeout(
+                    lambda a=asset: _fetch_history(a),
+                    THREAD_TIMEOUT_S, label=f"{asset.key}/fetch",
+                )
                 metrics = _metrics_from_series(asset, series)
+            except TimeoutError:
+                metrics = Metrics(asset=asset, error="timeout after {}s".format(THREAD_TIMEOUT_S))
             except Exception as exc:  # noqa: BLE001
                 metrics = Metrics(asset=asset, error=str(exc)[:100])
             results.append(metrics)
@@ -411,8 +519,6 @@ def _fmt_signed(value: Optional[float], pct: bool = False) -> str:
 
 
 def _fmt_pctile(value: Optional[float]) -> str:
-    import math
-
     if value is None or math.isnan(value):
         return "—"
     return f"{value:.0f}%"

@@ -23,10 +23,13 @@ from typing import Callable, Optional
 
 import requests
 
+from core.timed_thread import run_with_timeout
+
 EASTMONEY_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 REQUEST_SPACING_S = 0.5
 SOCKET_TIMEOUT_S = 20
 HTTP_TIMEOUT_S = 15
+THREAD_TIMEOUT_S = 30  # per-indicator wall-clock cap guards DNS hangs
 _UA = {"User-Agent": "Mozilla/5.0 (compatible; wanshi-tong/1.0)"}
 
 
@@ -194,16 +197,30 @@ def collect_indicators(log: Optional[Callable[[str], None]] = None) -> list[Indi
         for ind in INDICATORS:
             try:
                 if ind.source == "eastmoney":
-                    result = _collect_eastmoney(ind, report_cache, log)
+                    result = run_with_timeout(
+                        lambda i=ind: _collect_eastmoney(i, report_cache, log),
+                        THREAD_TIMEOUT_S, label=f"{ind.key}/collect",
+                    )
                 elif ind.source == "akshare_lpr":
-                    result = _collect_akshare_lpr(ind, akshare_cache, log)
+                    result = run_with_timeout(
+                        lambda i=ind: _collect_akshare_lpr(i, akshare_cache, log),
+                        THREAD_TIMEOUT_S, label=f"{ind.key}/lpr",
+                    )
                 elif ind.source == "akshare_shibor":
-                    result = _collect_akshare_shibor(ind, akshare_cache, log)
+                    result = run_with_timeout(
+                        lambda i=ind: _collect_akshare_shibor(i, akshare_cache, log),
+                        THREAD_TIMEOUT_S, label=f"{ind.key}/shibor",
+                    )
                 elif ind.source == "akshare_tsf":
-                    result = _collect_akshare_tsf(ind, akshare_cache, log)
+                    result = run_with_timeout(
+                        lambda i=ind: _collect_akshare_tsf(i, akshare_cache, log),
+                        THREAD_TIMEOUT_S, label=f"{ind.key}/tsf",
+                    )
                 else:
                     result = IndicatorResult(definition=ind, error="unknown source: " + ind.source)
                 results.append(result)
+            except TimeoutError:
+                results.append(IndicatorResult(definition=ind, error="timeout after {}s".format(THREAD_TIMEOUT_S)))
             except Exception as exc:  # noqa: BLE001
                 results.append(IndicatorResult(definition=ind, error=str(exc)[:100]))
                 if log:

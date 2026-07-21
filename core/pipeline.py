@@ -48,8 +48,30 @@ def collect_tasks(
 
     started_at = time.monotonic()
     raw_results = run_parallel(tasks)
-    log(f"[step 3/7] collection done ({time.monotonic() - started_at:.1f}s)")
+    log(f"[step 4/8] agentic collection done ({time.monotonic() - started_at:.1f}s)")
     return dict(zip((task.name for task in tasks), raw_results, strict=True))
+
+
+def collect_local(
+    modules: Sequence[Module],
+    date_templates: dict[str, str] | None,
+    log: Log,
+) -> dict[str, ModuleResult]:
+    """Run every LocalModule's ``collect()`` first, before agentic tasks.
+
+    Non-agentic data fetching (asset prices, Chinese macro indicators, 新闻联播)
+    is deterministic and bounded, so it runs ahead of -- and never waits on --
+    the slower LLM-driven agentic collection loop. Returns a name->result dict
+    so the merge step can slot the local results back in without re-fetching.
+    """
+    local_modules = [m for m in modules if isinstance(m, LocalModule)]
+    local_results: dict[str, ModuleResult] = {}
+    if not local_modules:
+        return local_results
+    log(f"  {len(local_modules)} non-agentic modules, collecting first...")
+    for module in local_modules:
+        local_results[module.name] = _collect_local(module, date_templates, log)
+    return local_results
 
 
 def merge_results(
@@ -57,14 +79,24 @@ def merge_results(
     results_by_task: dict[str, str],
     log: Log,
     date_templates: dict[str, str] | None = None,
+    local_results: dict[str, ModuleResult] | None = None,
 ) -> list[ModuleResult]:
+    """Combine agentic task results with pre-collected local module results.
+
+    ``local_results`` (produced by :func:`collect_local`) supplies the
+    LocalModule outputs collected before the agentic loop; if absent, the
+    local collection is performed inline for backward compatibility.
+    """
+    local_results = local_results or {}
     module_results = []
     for module in modules:
         if isinstance(module, LocalModule):
-            result = _collect_local(module, date_templates, log)
+            if module.name in local_results:
+                module_results.append(local_results[module.name])
+            else:
+                module_results.append(_collect_local(module, date_templates, log))
         else:
-            result = _merge_agentic(module, results_by_task, log)
-        module_results.append(result)
+            module_results.append(_merge_agentic(module, results_by_task, log))
     return module_results
 
 

@@ -26,11 +26,11 @@ class ModuleTaskTest(unittest.TestCase):
         self.assertIn("教育医疗", modules[1].get_tasks(self.templates)[0].prompt)
         self.assertIn("AI/大模型", modules[2].get_tasks(self.templates)[0].prompt)
 
-    def test_macro_task_policy_is_declarative(self):
-        tasks = MacroDataModule().get_tasks(self.templates)
-
-        self.assertEqual([task.idle_timeout_s for task in tasks], [600, 600])
-        self.assertEqual([task.max_attempts for task in tasks], [1, 1])
+    def test_macro_module_is_non_agentic(self):
+        module = MacroDataModule()
+        self.assertEqual(len(module.get_tasks(self.templates)), 0)
+        self.assertEqual(module.name, "macro_data")
+        self.assertTrue(getattr(module, "preserve_dates", False))
 
 
 if __name__ == "__main__":

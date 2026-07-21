@@ -6,21 +6,33 @@ from filters.importance_filter import ImportanceFilter
 
 
 class ImportanceFilterTest(unittest.TestCase):
-    @patch("filters.importance_filter.run_opencode", return_value="整理后内容")
-    def test_asset_prices_use_structured_consolidation_prompt(self, run_opencode):
+    @patch("filters.importance_filter.run_opencode", return_value="不应被调用")
+    def test_macro_data_authoritative_results_skip_filtering(self, run_opencode):
         module_result = ModuleResult(
-            name="asset_prices",
-            title="资产",
-            content="上证 | 3000 | +1% | 2026-07-14",
+            name="macro_data",
+            title="宏观",
+            content="CPI (同比) CPI (YoY) | 1.00% | 2026-06-01 | East Money",
+            authoritative=True,
         )
 
         result = ImportanceFilter().filter(module_result)
 
-        prompt = run_opencode.call_args.args[0]
-        self.assertIn("不要按新闻重要性丢弃市场价格", prompt)
-        self.assertIn("名称 | 价格 | 涨跌幅 | 日期 | 来源", prompt)
-        self.assertNotIn("若无保留项，输出：本次搜索未发现重大新闻", prompt)
-        self.assertEqual(result.content, "整理后内容")
+        run_opencode.assert_not_called()
+        self.assertIs(result, module_result)
+
+    @patch("filters.importance_filter.run_opencode", return_value="不应被调用")
+    def test_authoritative_results_skip_filtering(self, run_opencode):
+        module_result = ModuleResult(
+            name="asset_prices",
+            title="资产",
+            content="上证指数 | 3864 | +1.79% | 2026-07-21",
+            authoritative=True,
+        )
+
+        result = ImportanceFilter().filter(module_result)
+
+        run_opencode.assert_not_called()
+        self.assertIs(result, module_result)
 
     @patch("filters.importance_filter.run_opencode", return_value="筛选后内容")
     def test_news_modules_use_importance_prompt(self, run_opencode):
