@@ -31,6 +31,8 @@ class ModuleResult:
     content: str
     model: str = ""
     error: Optional[str] = None
+    # Deterministic data that must not be reprocessed/rescored by LLM filters.
+    authoritative: bool = False
 
 
 class Module(ABC):
@@ -76,6 +78,27 @@ class Module(ABC):
             content=raw,
             model=self.model,
         )
+
+
+class LocalModule(Module):
+    """Non-agentic module that computes its own content in Python.
+
+    Unlike a normal Module, it emits no opencode tasks; the pipeline calls
+    ``collect`` directly. Use this for deterministic data (e.g. market prices)
+    that should be fetched from an API rather than an LLM + search tools.
+    """
+
+    # When True, the report's date-cleanup pass keeps this section verbatim,
+    # so authoritative rows are never dropped for carrying a non-today date
+    # (e.g. a last-trading-day close over a weekend or holiday).
+    preserve_dates: bool = True
+
+    def get_tasks(self, date_templates: Mapping[str, str] | None = None) -> list[Task]:
+        return []
+
+    def collect(self, date_templates: Mapping[str, str] | None = None) -> ModuleResult:
+        """Fetch data and return the finished result. Must not raise."""
+        raise NotImplementedError
 
 
 class Filter(ABC):

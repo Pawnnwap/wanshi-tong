@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from core.base import Filter, ModuleResult
 from core.opencode_client import run_opencode
-from modules.catalog import ASSET_ITEMS_ZH, MACRO_ITEMS_ZH
+from modules.catalog import MACRO_ITEMS_ZH
 
 
 class ImportanceFilter(Filter):
@@ -10,13 +10,6 @@ class ImportanceFilter(Filter):
     model = ""
 
     STRUCTURED_MODULES = {
-        "asset_prices": (
-            "整理资产价格数据：合并中英文结果，去重，保留可核验的价格、涨跌幅和日期；"
-            "不要按新闻重要性丢弃市场价格。\n"
-            f"必须尽量覆盖：{ASSET_ITEMS_ZH}。\n"
-            "输出中文表格，格式：名称 | 价格 | 涨跌幅 | 日期 | 来源。\n"
-            "只使用输入中已有或可核验的信息；缺失项写“未取得”，禁止编造。"
-        ),
         "macro_data": (
             "整理宏观数据：合并中英文结果，去重，保留最新可核验数据；"
             "不要按新闻重要性丢弃宏观指标。\n"
@@ -39,7 +32,11 @@ class ImportanceFilter(Filter):
         )
 
     def filter(self, module_result: ModuleResult) -> ModuleResult:
-        if module_result.error or not module_result.content.strip():
+        if (
+            module_result.authoritative
+            or module_result.error
+            or not module_result.content.strip()
+        ):
             return module_result
 
         filtered_content = run_opencode(

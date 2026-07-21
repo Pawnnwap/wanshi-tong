@@ -3,7 +3,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from core.base import Analyzer, Filter, Module, ModuleResult, Reporter, Task
+from core.base import Analyzer, Filter, LocalModule, Module, ModuleResult, Reporter, Task
 from core.opencode_client import run_parallel
 from core.registry import (
     discover_analyzers,
@@ -56,15 +56,44 @@ def merge_results(
     modules: Sequence[Module],
     results_by_task: dict[str, str],
     log: Log,
+    date_templates: dict[str, str] | None = None,
 ) -> list[ModuleResult]:
     module_results = []
     for module in modules:
-        zh_raw = results_by_task[f"{module.name}_zh"]
-        en_raw = results_by_task[f"{module.name}_en"]
-        combined = module.combine_results(zh_raw, en_raw)
-        module_results.append(module.parse_result(combined))
-        log(f"  {module.name}: zh={len(zh_raw)}c + en={len(en_raw)}c = {len(combined)}c")
+        if isinstance(module, LocalModule):
+            result = _collect_local(module, date_templates, log)
+        else:
+            result = _merge_agentic(module, results_by_task, log)
+        module_results.append(result)
     return module_results
+
+
+def _merge_agentic(
+    module: Module,
+    results_by_task: dict[str, str],
+    log: Log,
+) -> ModuleResult:
+    zh_raw = results_by_task[f"{module.name}_zh"]
+    en_raw = results_by_task[f"{module.name}_en"]
+    combined = module.combine_results(zh_raw, en_raw)
+    log(f"  {module.name}: zh={len(zh_raw)}c + en={len(en_raw)}c = {len(combined)}c")
+    return module.parse_result(combined)
+
+
+def _collect_local(
+    module: LocalModule,
+    date_templates: dict[str, str] | None,
+    log: Log,
+) -> ModuleResult:
+    log(f"  {module.name}: collecting locally (non-agentic)...")
+    started_at = time.monotonic()
+    try:
+        result = module.collect(date_templates)
+    except Exception as exc:  # noqa: BLE001 -- keep the pipeline alive on data failures
+        log(f"  {module.name}: local collection failed: {exc}")
+        return ModuleResult(name=module.name, title=module.title, content="", error=str(exc))
+    log(f"  {module.name}: local collection done ({time.monotonic() - started_at:.1f}s, {len(result.content)}c)")
+    return result
 
 
 def apply_filters(

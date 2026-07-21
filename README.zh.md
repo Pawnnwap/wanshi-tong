@@ -20,9 +20,9 @@
 报告器 (1 个）    -->  飞书 Webhook 推送
 ```
 
-自动发现：`core/registry.py` 通过 `pkgutil` 自动发现模块、过滤器、分析器和报告器。`modules/catalog.py` 包含共享的资产和宏观指标目录常量。
+自动发现：`core/registry.py` 通过 `pkgutil` 自动发现模块、过滤器、分析器和报告器。`modules/catalog.py` 包含共享的宏观指标目录常量。
 
-所有组件通过 `pkgutil` 自动发现 —— 在 `modules/` 下新建 `.py` 文件即可，无需注册。`modules/catalog.py` 提供资产列表和宏观指标的共享常量。日期敏感型新闻采集器继承 `modules/news.py` 中的 `NewsModule`，表格/结构化数据采集器继承 `modules/structured_data.py` 中的 `StructuredDataModule`。
+所有组件通过 `pkgutil` 自动发现 —— 在 `modules/` 下新建 `.py` 文件即可，无需注册。`modules/catalog.py` 提供宏观指标的共享常量。日期敏感型新闻采集器继承 `modules/news.py` 中的 `NewsModule`，表格/结构化数据采集器继承 `modules/structured_data.py` 中的 `StructuredDataModule`。确定性的非智能体采集器（如 `asset_prices`）继承 `core/base.py` 中的 `LocalModule`，直接用 Python 拉取数据而不驱动大模型。
 
 运行职责按模块拆分：`core/context.py` 统一管理运行时间和日期模板，`core/pipeline.py` 编排组件，`core/process.py` 执行带空闲进度监控的子进程，`core/report.py` 负责报告渲染和日期清理，`core/registry.py` 处理所有组件类型的自动发现。新闻和结构化数据采集器分别继承 `modules/news.py` 与 `modules/structured_data.py` 的共享提示词策略。
 
@@ -101,11 +101,13 @@ python main.py
 | 提供商 | 使用方 | 用途 |
 |--------|--------|------|
 | **newsmcp** | tech_news, social_news, political_news | 结构化新闻头条及元数据 |
-| **financial-mcp** | macro_data, asset_prices | FRED 宏观数据、股票报价、外汇、加密货币 |
+| **financial-mcp** | macro_data | FRED 宏观数据 |
 | **rss-news** | 所有新闻模块 | RSS 订阅聚合（备选方案） |
-| **websearch** | 所有模块 | 通用网页搜索补充细节 |
+| **websearch** | 所有智能体模块 | 通用网页搜索补充细节 |
 
 请确保这些 MCP 服务器已配置并在你的 opencode 环境中运行。配置指南见 [opencode 文档](https://opencode.ai)。
+
+> **说明：** `asset_prices` 为**非智能体（non-agentic）**模块，完全不经过 opencode 或 MCP。它通过 [akshare](https://akshare.akfamily.xyz/) 从中国大陆可访问的数据源（东方财富、新浪、金十）确定性地拉取行情，因此在 `yfinance` 等境外数据源被墙的环境下仍可正常工作。详见 [本地（非智能体）数据模块](#本地非智能体数据模块)。
 
 ## 模块列表
 
@@ -115,7 +117,7 @@ python main.py
 | social_news | 头条社会新闻 | 民生、教育、健康、环境、突发新闻 |
 | political_news | 头条政经新闻 | 政策、外交、经济数据、地缘政治 |
 | macro_data | 宏观最新数据与指标 | GDP、CPI、PMI、利率、油价（中国/美国/欧盟/日本） |
-| asset_prices | 资产与股指价格及涨跌 | 主要股指、外汇、大宗商品、加密货币 |
+| asset_prices | 资产与股指价格及涨跌 | 23 项资产：股指、外汇、大宗商品、加密货币 —— **非智能体**（akshare），附 20日/60日/1年分位 |
 
 ## 添加模块
 
@@ -175,7 +177,43 @@ class MyDataModule(StructuredDataModule):
     output_en = "output format"
 ```
 
-对于资产列表和宏观指标常量，可从 `modules.catalog` 导入。任何模块类型都无需注册。
+### 本地（非智能体）数据模块
+
+对于应通过 API 而非大模型获取的确定性数据，继承 `core/base.py` 中的 `LocalModule` 并实现 `collect()`。它不产生 opencode 任务，流水线会直接调用 `collect()`；返回结果标记为 `authoritative`，重要性过滤器因此不会改动它。`preserve_dates`（默认 `True`）还会让该板块跳过报告的过期日期清理，因此周末/节假日的最后交易日收盘价不会被误删。
+
+```python
+from typing import Mapping
+
+from core.base import LocalModule, ModuleResult
+
+
+class MyLocalModule(LocalModule):
+    name = "my_local"
+    title = "我的本地数据"
+
+    def collect(self, date_templates: Mapping[str, str] | None = None) -> ModuleResult:
+        content = ...  # 确定性地拉取并格式化（不得抛异常）
+        return ModuleResult(self.name, self.title, content, authoritative=True)
+```
+
+`asset_prices` 即参考实现：[modules/asset_prices.py](modules/asset_prices.py) 是一个轻量 `LocalModule`，而 [modules/market_data.py](modules/market_data.py) 承载数据拉取、重试/限速逻辑、23 项资产目录以及分位指标计算。每行给出最新收盘价、相对上一交易日的绝对与百分比涨跌，以及收盘价在其过去 20 日/60 日/1 个日历年窗口内的分位位置（0%＝区间最低，100%＝区间最高）和 1 年区间。
+
+**多源容错：** 每项资产都配置了一组跨**不同主机**的 `Source`，按顺序尝试直到某个返回数据，因此没有任何单一数据源会成为单点故障（尤其东方财富限流较严）。全部数据均来自中国大陆可访问的端点：
+
+| 资产类别 | 主源 | 备源 | 无新浪？ |
+|---|---|---|---|
+| A 股指数 | 腾讯 kline（qq.com） | 东方财富 | ✅ |
+| 港股指数 | 腾讯 kline（qq.com） | 东方财富 | ✅ |
+| 美股指数 | 腾讯 kline（qq.com） | 东方财富 | ✅ |
+| 欧洲/日本指数 | 新浪（`index_global_hist_sina`） | 东方财富 | ❌ 无第三源 |
+| 美元指数（DXY） | 东方财富（`index_global_hist_em`） | — | ✅ |
+| 外汇对 | 东方财富（`forex_hist_em`） | CFETS 即期（chinamoney.com.cn） | ✅ |
+| 大宗商品 | 新浪（`futures_foreign_hist`） | — | ❌ 无第三源 |
+| 加密货币（BTC/ETH） | Kraken 公共 API | — | ✅ |
+
+A 股/港股/美股指数与外汇**完全不经过新浪**。欧洲/日本指数与大宗商品在 akshare 中没有第三个中国大陆可访问源（仅有新浪和东方财富），因此这两类无法避开新浪（东方财富为欧洲/日本的备源）。
+
+对于宏观指标常量，可从 `modules.catalog` 导入。任何模块类型都无需注册。
 
 ## 致谢
 

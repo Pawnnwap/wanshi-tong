@@ -42,8 +42,10 @@ def main() -> None:
     log("[step 3/7] Bilingual search collection...")
     task_results = collect_tasks(components.modules, context.date_templates, log)
 
-    log("[step 4/7] Merging Chinese/English results...")
-    module_results = merge_results(components.modules, task_results, log)
+    log("[step 4/7] Merging results (agentic) + local data collection...")
+    module_results = merge_results(
+        components.modules, task_results, log, context.date_templates
+    )
     log("[step 4/7] merge done")
 
     if components.filters:
@@ -60,7 +62,12 @@ def main() -> None:
 
     log("[step 7/7] Assembling report...")
     report = render_report(module_results, analysis, context)
-    report = cleanup_dates(report, context.allowed_dates)
+    preserved_titles = [
+        module.title
+        for module in components.modules
+        if getattr(module, "preserve_dates", False)
+    ]
+    report = cleanup_dates(report, context.allowed_dates, preserved_titles)
     report_path = save_report(report, context.report_filename)
     log(f"  report length: {len(report)}c")
     log(f"  saved: {report_path}")

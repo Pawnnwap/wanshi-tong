@@ -33,17 +33,31 @@ def save_report(content: str, path: str | Path) -> Path:
     return report_path
 
 
-def cleanup_dates(content: str, allowed_dates=None) -> str:
-    """Remove stale collection lines while preserving historical analysis citations."""
+def cleanup_dates(content: str, allowed_dates=None, preserved_titles=None) -> str:
+    """Remove stale collection lines while preserving historical analysis citations.
+
+    Sections whose heading matches ``preserved_titles`` (e.g. authoritative,
+    non-agentic market data) are kept verbatim: their dates are real and may be
+    a last-trading-day close that legitimately falls outside yesterday/today.
+    """
     allowed = _normalize_allowed_dates(allowed_dates)
     allowed_month_days = {(value.month, value.day) for value in allowed}
+    preserved = {title.strip() for title in (preserved_titles or ())}
     cleaned_lines = []
     in_analysis = False
+    in_preserved = False
 
     for line in content.splitlines():
-        if line.strip() == ANALYSIS_HEADING:
+        stripped = line.strip()
+        if stripped == ANALYSIS_HEADING:
             in_analysis = True
-        if in_analysis or not _has_disallowed_date(line, allowed, allowed_month_days):
+        elif stripped.startswith("## "):
+            in_preserved = stripped[len("## "):].strip() in preserved
+        if (
+            in_analysis
+            or in_preserved
+            or not _has_disallowed_date(line, allowed, allowed_month_days)
+        ):
             cleaned_lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned_lines))
 
